@@ -1,0 +1,14 @@
+# Vivado 工程缓存文件 (Project Cache)
+project/
+*.jou
+*.log
+*.str
+*.Xil/
+
+# Python 运行缓存
+__pycache__/
+*.pyc
+
+# 系统文件
+.DS_Store
+Thumbs.db
