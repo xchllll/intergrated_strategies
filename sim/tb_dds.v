@@ -6,13 +6,15 @@ module tb_dds;
     reg en = 0;
     reg [31:0] phase_inc = 32'd42950; 
     wire signed [15:0] sine;
+    wire signed [15:0] cosine;
 
     dds dut (
         .clk(clk), 
         .rst_n(rst_n), 
         .en(en), 
         .phase_inc(phase_inc), 
-        .sine(sine)
+        .sine(sine),
+        .cosine(cosine)
     );
 
     always #5 clk = ~clk;
