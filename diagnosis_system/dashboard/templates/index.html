@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>电路智能诊断系统 V1</title>
+    <!-- 引入本地刚刚下载的 Plotly 画图工具 -->
+    <script src="/static/plotly.min.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { display: flex; flex-direction: column; gap: 20px; }
+        .chart-box { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h2 { margin-top: 0; font-size: 18px; color: #333; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 5px; }
+        button:hover { background: #0056b3; }
+    </style>
+</head>
+<body>
+    <h1>便携式电子电路智能诊断系统</h1>
+    <button onclick="fetchData()">手动刷新扫频数据</button>
+    
+    <div class="container" style="margin-top: 20px;">
+        <!-- 幅频图画板 -->
+        <div class="chart-box">
+            <h2>幅频特性 (Bode - Magnitude)</h2>
+            <div id="mag-plot"></div>
+        </div>
+        <!-- 相频图画板 -->
+        <div class="chart-box">
+            <h2>相频特性 (Bode - Phase)</h2>
+            <div id="phase-plot"></div>
+        </div>
+    </div>
+
+    <!-- 引入刚刚建好的 JavaScript 画图逻辑 -->
+    <script src="/static/dashboard.js"></script>
+    <script>
+        // 页面加载完自动获取一次数据画图
+        window.onload = fetchData;
+    </script>
+</body>
+</html>
