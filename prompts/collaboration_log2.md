@@ -1,0 +1,4 @@
+| 19 | 我改了两个代码想 `git push`，但提示 `Failed to connect to github.com port 443`，网络超时，怎么解决？ | AI 判断是 Git 没有走代理。建议先在系统里查找代理端口，然后用 `git config` 全局设置 HTTP/HTTPS 代理。 | **验证**：我用 `netsh` 查不到系统代理，但在 SakuraCat 找到了 Mixed 端口 `12450`。让 AI 确认后，通过 `git config` 设置代理，成功推送。 |
+| 20 | 我自己新建了一个 `diagnosis_system` 文件夹，想放进原来的协作仓库里，并且还要配置 python 环境，怎么弄？ | AI 推荐不要在外部重新 clone，而是将代码文件夹剪切到主仓库目录下，并重建 venv。 | **自我纠错/验证**：起初我想把 `.venv` 一起移过去，AI 纠正说 `.venv` 写死了绝对路径不能移。我删除了旧环境，在主仓库下重建，并通过 `.gitignore` 忽略了 `.venv`，保证了仓库干净。 |
+| 21 | 我在 VS Code 里新建虚拟环境，终端已经是绿色 `(.venv)` 了，但 `pip install` 时弹出警告说我装到了全局环境。 | AI 解释了这是 VS Code 界面未同步造成的“假警报”，推荐用 `where pip` 确认路径。 | **验证**：在终端输入 `where pip`，发现路径确实在 `.venv\Scripts` 下。通过 `Ctrl+Shift+P` 重新选择解释器后，警告消失。 |
+| 22 | 环境搭好了，我要怎么具体把网页界面做出来？用什么语言？ | AI 提供了 `Flask + Plotly.js` 的技术栈，并给出了 `common`、`dashboard`、`ml` 的工程目录结构。 | **验证中**：按照 AI 提供的步骤，我建立了全套目录，下载了本地离线包 `plotly.min.js`，目前正在准备测试前端能否正常画出假数据的 Bode 图。 |
