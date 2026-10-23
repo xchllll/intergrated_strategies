@@ -2,40 +2,85 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>电路智能诊断系统 V1</title>
-    <!-- 引入本地刚刚下载的 Plotly 画图工具 -->
+    <title>便携式电子电路智能诊断系统</title>
     <script src="/static/plotly.min.js"></script>
     <style>
-        body { font-family: sans-serif; margin: 20px; background: #f5f5f5; }
-        .container { display: flex; flex-direction: column; gap: 20px; }
-        .chart-box { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        h2 { margin-top: 0; font-size: 18px; color: #333; }
-        button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 5px; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background: #eef2f5; }
+        .header { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); margin-bottom: 20px; }
+        h1 { margin: 0; color: #333; font-size: 24px; }
+        
+        .control-panel { display: flex; align-items: center; gap: 20px; }
+        button { padding: 10px 25px; font-size: 16px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 6px; transition: 0.3s; }
         button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        
+        /* 缓冲器开关样式 */
+        .switch-container { display: flex; align-items: center; gap: 10px; font-size: 16px; color: #555; }
+        .switch { position: relative; display: inline-block; width: 50px; height: 26px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 26px; }
+        .slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: #28a745; }
+        input:checked + .slider:before { transform: translateX(24px); }
+
+        .main-content { display: flex; gap: 20px; }
+        .chart-section { flex: 3; display: flex; flex-direction: column; gap: 20px; }
+        .chart-box { background: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        h2 { margin-top: 0; font-size: 18px; color: #333; }
+        
+        /* AI 结果面板 */
+        .ai-section { flex: 1; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); display: flex; flex-direction: column; }
+        .ai-result { margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 5px solid #17a2b8; }
+        .ai-label { color: #6c757d; font-size: 14px; margin-bottom: 5px; }
+        .ai-value { font-size: 24px; font-weight: bold; color: #007bff; margin-bottom: 15px; }
+        .conf-value { font-size: 20px; font-weight: bold; color: #28a745; }
     </style>
 </head>
 <body>
-    <h1>便携式电子电路智能诊断系统</h1>
-    <button onclick="fetchData()">手动刷新扫频数据</button>
-    
-    <div class="container" style="margin-top: 20px;">
-        <!-- 幅频图画板 -->
-        <div class="chart-box">
-            <h2>幅频特性 (Bode - Magnitude)</h2>
-            <div id="mag-plot"></div>
+    <div class="header">
+        <h1>便携式电子电路智能诊断系统</h1>
+        <div class="control-panel">
+            <div class="switch-container">
+                <span>启用缓冲器(电压跟随)</span>
+                <label class="switch">
+                    <input type="checkbox" id="buffer-toggle">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <button id="start-btn" onclick="startSweep()">开始扫频测量</button>
         </div>
-        <!-- 相频图画板 -->
-        <div class="chart-box">
-            <h2>相频特性 (Bode - Phase)</h2>
-            <div id="phase-plot"></div>
+    </div>
+    
+    <div class="main-content">
+        <!-- 双图区 -->
+        <div class="chart-section">
+            <div class="chart-box">
+                <h2>幅频特性 (Bode - Magnitude)</h2>
+                <div id="mag-plot"></div>
+            </div>
+            <div class="chart-box">
+                <h2>相频特性 (Bode - Phase)</h2>
+                <div id="phase-plot"></div>
+            </div>
+        </div>
+        
+        <!-- AI 识别结果面板 -->
+        <div class="ai-section">
+            <h2>AI 识别结果</h2>
+            <p style="color:#666; font-size:14px;">基于实测扫频曲线特征进行拓扑识别</p>
+            <div class="ai-result">
+                <div class="ai-label">预测电路类型</div>
+                <div class="ai-value" id="ai-topo">待接入模型</div>
+                
+                <div class="ai-label">模型置信度</div>
+                <div class="conf-value" id="ai-conf">--%</div>
+            </div>
+            <div style="margin-top:auto; font-size:12px; color:#999;">
+                *直连与缓冲校准已在PS端应用
+            </div>
         </div>
     </div>
 
-    <!-- 引入刚刚建好的 JavaScript 画图逻辑 -->
     <script src="/static/dashboard.js"></script>
-    <script>
-        // 页面加载完自动获取一次数据画图
-        window.onload = fetchData;
-    </script>
 </body>
-</html>
+</html>>
