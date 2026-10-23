@@ -4,7 +4,7 @@ import math
 # 1. 设定系统参数
 fs = 100000       # Sample Frequency (采样频率)：每秒采集 10 万个点 (100kHz)
 f_in = 1000       # Input Frequency (输入信号频率)：被测信号为 1kHz
-N = 1000          # Number of points (积分点数)：1000 个点刚好是 1kHz 信号的一个完整周期
+N = 100          # Number of points (积分点数)：100 个点刚好是 1kHz 信号的一个完整周期
 
 print(f"系统初始化完成：采样率 {fs} Hz,测试信号频率 {f_in} Hz,积分窗口 {N} 点。")
 
@@ -16,7 +16,7 @@ t = np.arange(N) / fs
 # 模拟被测信号：Amplitude (幅度)=1.5, Phase (相位)=pi/4 (45度)
 signal_in = 1.5 * np.cos(2 * np.pi * f_in * t + np.pi/4)
 
-# 打印前 5 个数据点，看看波形长什么样
+# 打印前 100 个数据点，看看波形长什么样
 print("前 5 个采样点的值:")
 for i in range(5):
     print(f"时间 {t[i]:.5f} 秒, 信号值: {signal_in[i]:.4f}")
