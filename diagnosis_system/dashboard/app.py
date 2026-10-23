@@ -1,6 +1,11 @@
 from flask import Flask, render_template, jsonify, request
 from mock_data import get_mock_sweep
 import time
+import sys
+import os
+
+# 把项目根目录加入环境变量，这样才能导入 ml 里的模块
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 app = Flask(__name__)
 
@@ -39,7 +44,12 @@ def start_sweep():
     # 拿到 clean_data 后，等 ML 模型训练好，在这里调用推理。
     # 预期返回: {"label": "类型", "confidence": 0.95}
     # =========================================================
-    latest_ai_result = None 
+    try:
+        from ml.infer import predict_topology
+        latest_ai_result = predict_topology(clean_data)
+    except Exception as e:
+        print(f"AI 推理失败: {e}")
+        latest_ai_result = None 
 
     # 把结果打包回传给网页
     return jsonify({
