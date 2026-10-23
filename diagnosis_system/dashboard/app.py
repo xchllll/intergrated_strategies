@@ -5,7 +5,7 @@ import sys
 import os
 
 # 把项目根目录加入环境变量，这样才能导入 ml 里的模块
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 app = Flask(__name__)
 
