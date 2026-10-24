@@ -15,6 +15,7 @@ module top (
     output wire        i2s_bclk,
     output wire        i2s_lrclk,
     output wire        i2s_sdata,
+    input  wire        i2s_sdata_in,
     output wire        au_mclk
 );
 
@@ -31,6 +32,11 @@ module top (
     wire signed [15:0] wire_dds_cosine;
     wire signed [47:0] acc_I_full;
     wire signed [47:0] acc_Q_full;  
+    wire signed [15:0] rx_left_data;
+    wire signed [15:0] rx_right_data;
+    wire               rx_data_valid;
+
+    
 
     dds u_dds (
         .clk(clk), .rst_n(sys_rst_n), .en(1'b1), // 用内部复位
@@ -44,9 +50,15 @@ module top (
         .bclk(i2s_bclk), .lrclk(i2s_lrclk), .sdata(i2s_sdata)
     );
 
+    i2s_rx u_i2s_rx (
+            .clk(clk), .rst_n(sys_rst_n), // 用内部复位
+            .i2s_bclk(i2s_bclk), .i2s_lrclk(i2s_lrclk), .i2s_sdata_in(i2s_sdata_in),
+            .left_data(rx_left_data), .right_data(rx_right_data), .data_valid(rx_data_valid)
+        );
+        
     demod u_demod (
-        .clk(clk), .rst_n(sys_rst_n), .en(wire_sweep_en), .clear(wire_sweep_clear), // 用内部复位
-        .adc_in(wire_dds_sine), 
+        .clk(clk), .rst_n(sys_rst_n), .en(wire_sweep_en), .clear(wire_sweep_clear), 
+        .adc_in(rx_left_data), // ★ 改：用真实的左声道数据输入！而不是自环了！
         .ref_cos(wire_dds_cosine), .ref_sin(-wire_dds_sine), 
         .acc_I(acc_I_full), .acc_Q(acc_Q_full)  
     );
