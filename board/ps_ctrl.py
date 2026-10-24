@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ps_ctrl.py - PS 侧硬件控制驱动（PYNQ-Z2 / Zynq-7000）【补全版】
+ps_ctrl.py - PS 侧硬件控制驱动（PYNQ-Z2 / Zynq-7000）【溢出防护版】
 
 配合仓库 src/top.v 与 docs/register_map.md 使用：
 通过 4 个 AXI GPIO 完成"设频 -> 设积分窗 -> 启动 -> 回读 I/Q"的完整测量闭环。
@@ -32,6 +32,21 @@ ps_ctrl.py - PS 侧硬件控制驱动（PYNQ-Z2 / Zynq-7000）【补全版】
     SAMPLE_CLK 是解调采样时钟：当前 top.v 中 demod 直接跑 100 MHz 系统
     时钟；将来接入 I2S RX（编解码器采样，如 48 kHz）时，把 SAMPLE_CLK
     改为编解码器采样率即可，公式不变。
+
+【48 位累加器溢出防护】（v2 新增）
+    demod.v 的 acc_I / acc_Q 是 48 位有符号累加器，满量程上限
+    ACC_FULL_SCALE = 2^47 - 1 ≈ 1.407e14。同相满量程积分的最坏情况：
+        acc ≈ N * (A_ADC * A_LO / 2) = N * (32767 * 32767 / 2) ≈ N * 5.37e8
+    因此安全积分点数上限 SAFE_MAX_N ≈ 2.1e5（留 20% 裕量）。
+    本驱动在 set_window()/measure_once() 中自动把 periods 降到安全上限
+    之内（低频时 N 大，自动减周期；N 与归一化口径随实际窗长联动，精度
+    不受影响，返回的 window_n 始终是实际积分点数）。
+    注意：当频率低到"连 1 个完整周期都超过 SAFE_MAX_N"（满量程输入时
+    约 f < 477 Hz）时，软件无法仅靠减周期完全消除溢出风险，会打印警告；
+    此时应通过前端衰减/输入缩放降低 ADC 码值，或从硬件侧扩位宽/降本振。
+    （曾评估"分块积分、软件求和"方案：分块必须覆盖整数周期才能让 2f
+    分量平均为 0，而 f < 477 Hz 时单个完整周期已超安全上限，分块不成立，
+    故不采用，仅保留自动减周期 + 告警。）
 
 时序要点（top.v 行为）：
     1) ps_start 拉低后状态机回到 IDLE，IDLE 态将解调累加器清零，
@@ -69,6 +84,18 @@ REG_RANGE = 0x1000             # AXI GPIO 地址段长度（4096 字节）
 DEFAULT_PERIODS = 10           # 默认积分窗覆盖的信号周期数（整数）
 MIN_HOLD_S = 1e-3              # start 保持的最短时长（秒），留足状态机裕量
 
+# ---------------------------------------------------------------------------
+# 48 位累加器溢出防护参数（v2）
+# ---------------------------------------------------------------------------
+# demod.v 的 acc_I/acc_Q 为 48 位有符号累加器，满量程上限：
+ACC_FULL_SCALE = (1 << 47) - 1                    # ≈ 1.407e14
+LO_GAIN = 32767                                   # DDS 正弦表满量程（16 位）
+ADC_FULL_SCALE_16BIT = 32767                      # 输入信号最坏情况（满量程 16 位码值）
+# 同相满量程单点相干积分贡献 ≈ A_ADC * A_LO / 2；留 20% 裕量，得到安全点数上限：
+SAFE_MAX_N = int(0.8 * ACC_FULL_SCALE / (ADC_FULL_SCALE_16BIT * LO_GAIN / 2.0))
+# 仅靠减小 periods 即可保证安全的频率下限（periods=1 时 N 仍 ≤ SAFE_MAX_N）：
+SAFE_MIN_FREQ_HZ = SAMPLE_CLK / SAFE_MAX_N        # ≈ 477 Hz
+
 _mmio_cache = {}
 
 
@@ -87,6 +114,18 @@ def _to_signed_48(value):
     """把 48 位无符号读数转换成 Python 有符号整数（补码）。"""
     value &= 0xFFFFFFFFFFFF
     return value - (1 << 48) if value >= (1 << 47) else value
+
+
+def _safe_periods(freq_hz, periods):
+    """把 periods 限制到 48 位累加器安全范围内（满量程最坏情况），返回 ≥1 的值。
+
+    低频时单个信号周期的采样点数 N_period = SAMPLE_CLK/f 可能很大，
+    必须压低 periods 使 N = periods * N_period ≤ SAFE_MAX_N，
+    避免 acc_I/acc_Q 溢出 48 位有符号上限（溢出后数据不可用）。
+    """
+    n_per_period = SAMPLE_CLK / freq_hz
+    safe_p = int(SAFE_MAX_N / n_per_period)   # 满足安全条件的最多整数周期数
+    return max(1, min(periods, safe_p))
 
 
 # ---------------------------------------------------------------------------
@@ -111,12 +150,17 @@ def set_freq(freq_hz):
     return phase_inc
 
 
-def set_window(freq_hz, periods=DEFAULT_PERIODS):
+def set_window(freq_hz, periods=DEFAULT_PERIODS, auto_safe=True):
     """按"整数个信号周期"设置积分窗长并写入 axi_gpio_1。
 
     窗长 N = round(periods * SAMPLE_CLK / freq_hz)，表示解调积分窗覆盖
     periods 个完整信号周期（2f 分量在整数周期内平均为 0，低频精度有保证）。
     N 同时作为 calibration 的归一化点数，返回给调用方。
+
+    auto_safe=True（默认）：自动把 periods 限制到 48 位累加器安全范围内
+    （满量程最坏情况，见模块注释"溢出防护"），实际窗长 N 随之减小并原样
+    返回，调用方与归一化口径无需感知。低频极限（连 1 个周期都超上限）
+    会打印警告，此时需前端衰减或从硬件侧扩位宽/降本振。
 
     注意：必须在 ps_start 拉高之前调用；MEASURE 态中途改窗长无效。
     """
@@ -125,7 +169,20 @@ def set_window(freq_hz, periods=DEFAULT_PERIODS):
     if not isinstance(periods, int) or periods < 1:
         raise ValueError("periods 必须为正整数，收到 %r" % (periods,))
 
-    n = int(round(periods * SAMPLE_CLK / freq_hz))
+    used_periods = periods
+    if auto_safe:
+        used_periods = _safe_periods(freq_hz, periods)
+        if used_periods < periods:
+            print("WARNING: 为防 48bit 累加器溢出（满量程最坏情况），"
+                  "积分周期数 %d -> %d（f=%.1f Hz）"
+                  % (periods, used_periods, freq_hz))
+        if used_periods == 1 and SAMPLE_CLK / freq_hz > SAFE_MAX_N:
+            print("WARNING: f=%.1f Hz 时即使 1 个信号周期也超过 48bit 累加器"
+                  "安全上限（满量程输入，N=%.0f > SAFE_MAX_N=%d）；"
+                  "建议前端衰减/输入缩放，或硬件扩位宽/降本振。"
+                  % (freq_hz, SAMPLE_CLK / freq_hz, SAFE_MAX_N))
+
+    n = int(round(used_periods * SAMPLE_CLK / freq_hz))
     if n < 1:
         raise ValueError("积分窗长 N=%d < 1：请增大 periods 或降低频率" % n)
     if n > 0xFFFFFFFF:
@@ -179,6 +236,10 @@ def read_IQ():
 def measure_once(freq_hz, periods=DEFAULT_PERIODS, margin_s=1e-3):
     """一步完成单频点测量：设频 -> 设窗 -> 启动 -> 等待 -> 回读 -> 停止。
 
+    设窗时默认开启溢出防护（auto_safe，见 set_window）：低频点会自动
+    减小 periods 到 48 位累加器安全范围内，window_n 返回实际积分点数，
+    归一化口径不受影响。
+
     返回: (acc_I, acc_Q, window_n)
         acc_I / acc_Q: 48 位有符号累加值
         window_n:      本次实际积分点数 N（== 写入的 ps_window_max），
@@ -205,13 +266,15 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="PS 侧硬件控制驱动（PYNQ-Z2，补全版）")
+        description="PS 侧硬件控制驱动（PYNQ-Z2，溢出防护版）")
     parser.add_argument("--freq", type=float, default=1000.0,
                         help="测量频率 Hz（默认 1000）")
     parser.add_argument("--periods", type=int, default=DEFAULT_PERIODS,
                         help="积分窗覆盖的信号周期数（默认 %d）" % DEFAULT_PERIODS)
     args = parser.parse_args()
 
+    print("溢出防护：SAFE_MAX_N=%d 点；仅靠减周期可保证安全的频率下限 ≈ %.0f Hz"
+          % (SAFE_MAX_N, SAFE_MIN_FREQ_HZ))
     phase_inc = set_freq(args.freq)
     window_n = set_window(args.freq, args.periods)
     print("phase_inc = 0x%08X (%d)" % (phase_inc, phase_inc))
