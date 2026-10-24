@@ -54,7 +54,7 @@ CAL_PATH_BUFFER = "buffer"   # 缓冲校准（电压跟随器）：信号经缓�
 # ps_ctrl.measure_once() 返回的实际窗长（随频率变化），不得用固定值。
 DEFAULT_INTEGRATION_N = 10000
 
-ADC_GAIN = 10000    # ADC 数字化增益（定点模型口径；codec 直采链路改为 1.0）
+ADC_GAIN = 1.0    # ADC 数字化增益（定点模型口径；codec 直采链路改为 1.0）
 LO_GAIN = 32767     # DDS 正弦表满量程
 
 ADC_FULL_SCALE_V = 1.0   # ADC 满量程电压（V）：按实际前端电路填写，默认 ±1V 占位
