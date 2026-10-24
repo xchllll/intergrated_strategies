@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-calibration.py - 解调后处理与四态校准（幅值/相位还原）【直连/缓冲口径版】
+calibration.py - 解调后处理与四态校准（幅值/相位还原）【直连/缓冲口径版】【校准闭环版】
 
 输入：ps_ctrl.read_IQ() 返回的 48 位累加值 acc_I / acc_Q，
      以及本次测量实际使用的积分点数 N（ps_ctrl.measure_once() 的返回值）
@@ -34,12 +34,24 @@ calibration.py - 解调后处理与四态校准（幅值/相位还原）【直�
     标定结果按路径（CAL_PATH_DIRECT / CAL_PATH_BUFFER）分别写入
     CAL_TABLE，apply_calibration() 按 path 参数查表线性插值修正，
     与网页端"启用缓冲器(电压跟随)"开关一一对应。
-    校准表当前为空：待上板测试后由 four_state_calibrate() 填充，
-    或手动填写。
+
+v3（校准闭环，解决"校准表为空且 four_state_calibrate 从未被调用"的缺口）：
+    * CAL_TABLE_DEFAULT_PATH  校准表默认落盘/读取路径（data/calibration_table.json）
+    * ensure_calibration_loaded()  扫频前调用一次即自动加载已保存的校准表
+    * run_four_state_calibration() 四态校准完整流程：逐频点实测 4 个参考态 ->
+      填充 CAL_TABLE -> 保存 JSON（此前该函数只定义不执行）
+    * calibration_status()    如实上报校准状态，供网页端显示真实校准情况，
+      不再出现"已校准"文案但校准表为空的误导
+    * apply_calibration()     表为空且默认校准表文件存在时自动加载；警告只提示一次
+    注意：真实四态校准依赖参考态硬件（直连/缓冲/+90°/+180° 可切换参考源），
+    仓库当前无该硬件驱动，real 流程需由调用方提供 measure_state 回调；
+    mock=True 可先跑通软件流程（自检/预演）。
 """
 
 import json
 import math
+import os
+import tempfile
 
 # ---------------------------------------------------------------------------
 # 校准路径（与网页端"启用缓冲器(电压跟随)"开关、测量流程一一对应）
@@ -60,13 +72,30 @@ LO_GAIN = 32767     # DDS 正弦表满量程
 ADC_FULL_SCALE_V = 1.0   # ADC 满量程电压（V）：按实际前端电路填写，默认 ±1V 占位
 
 # ---------------------------------------------------------------------------
-# 校准表（待上板测试后填充）
+# 校准表（上板实测后由 run_four_state_calibration() 自动填充）
 # 每频点一条记录（dict），包含两条路径的标定结果：
 #   {"freq": 1000.0,
 #    "direct": {"mag_gain": 1.0, "phase_offset_deg": 0.0},   # 直连（短接）
 #    "buffer": {"mag_gain": 1.0, "phase_offset_deg": 0.0}}   # 缓冲（电压跟随）
 # ---------------------------------------------------------------------------
 CAL_TABLE = []
+
+# 默认校准表文件路径（仓库 data/ 目录），可由环境/调用方覆盖
+CAL_TABLE_DEFAULT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "data", "calibration_table.json")
+
+# 四态参考态顺序（与 four_state_calibrate / run_four_state_calibration 一致）
+REF_STATE_NAMES = ("direct_0", "buffer_0", "direct_90", "direct_180")
+
+# 警告去重：同一类警告只打印一次，避免 240 个频点刷屏
+_WARNED = set()
+
+
+def _warn_once(key, message):
+    """带 key 去重的单次警告。"""
+    if key not in _WARNED:
+        _WARNED.add(key)
+        print("WARNING: " + message)
 
 
 # ---------------------------------------------------------------------------
@@ -122,22 +151,81 @@ def calc_mag_phase(I_raw, Q_raw, n=None):
     return mag, phase
 
 
+def calibration_status():
+    """如实返回当前校准状态（供网页端/日志展示，避免"已校准"但表为空的误导）。
+
+    返回 dict：
+        calibrated:   是否已有校准数据
+        freq_points:  已标定频点数
+        freq_min/max: 标定频率范围（无数据时为 None）
+        paths:        各路径已标定频点数 {"direct": n, "buffer": n}
+        table_file:   默认校准表文件路径（存在时），否则 None
+        message:      面向用户的一句话状态说明
+    """
+    rows = [r for r in CAL_TABLE if isinstance(r, dict)]
+    freq_points = sorted({r["freq"] for r in rows
+                          if isinstance(r.get("freq"), (int, float))})
+    path_counts = {p: sum(1 for r in rows if r.get(p) is not None)
+                   for p in (CAL_PATH_DIRECT, CAL_PATH_BUFFER)}
+    table_exists = os.path.isfile(CAL_TABLE_DEFAULT_PATH)
+    if freq_points:
+        msg = "校准表已就绪：%d 个频点（%.0f~%.0f Hz）" % (
+            len(freq_points), freq_points[0], freq_points[-1])
+    else:
+        msg = "校准表为空：尚未完成四态校准（run_four_state_calibration）"
+    return {
+        "calibrated": bool(freq_points),
+        "freq_points": len(freq_points),
+        "freq_min": freq_points[0] if freq_points else None,
+        "freq_max": freq_points[-1] if freq_points else None,
+        "paths": path_counts,
+        "table_file": CAL_TABLE_DEFAULT_PATH if table_exists else None,
+        "message": msg,
+    }
+
+
+def ensure_calibration_loaded(path=None):
+    """若校准表文件存在且内存表为空，则加载之；返回是否已有可用校准数据。
+
+    建议在扫频前调用一次（gen_dataset.py / app.py 的扫频入口），使校准自动生效；
+    加载失败只提示一次，不阻断测量。
+    """
+    global CAL_TABLE
+    path = path or CAL_TABLE_DEFAULT_PATH
+    if CAL_TABLE:
+        return True
+    if not os.path.isfile(path):
+        return False
+    try:
+        load_calibration_table(path)
+    except Exception as exc:  # noqa: BLE001 加载失败不阻断测量，仅提示一次
+        _warn_once("cal_load", "加载校准表 %s 失败（%s），本次测量将使用未校准值"
+                   % (path, exc))
+        return False
+    print("已加载校准表：%s（%d 个频点）" % (path, len(CAL_TABLE)))
+    return bool(CAL_TABLE)
+
+
 def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT):
     """查校准表，返回校准后的真实幅值与相位。
 
     只使用指定路径（直连/缓冲）的标定数据，在校准表频率范围内做线性
-    插值（相位偏移先回绕再插值），范围外取最近端点；表为空或该路径
-    未标定时返回原值并打印警告。
+    插值（相位偏移先回绕再插值），范围外取最近端点；表为空时若默认校准
+    表文件存在则自动加载，仍无数据或该路径未标定时返回原值并提示一次。
     返回: (mag_cal, phase_cal)
     """
     if not CAL_TABLE:
-        print("WARNING: CAL_TABLE 为空，请先完成四态校准（four_state_calibrate）后重试。")
-        return mag, phase
+        if not ensure_calibration_loaded():
+            _warn_once("cal_empty",
+                       "校准表为空：尚未完成四态校准（run_four_state_calibration），"
+                       "本次返回未校准值。")
+            return mag, phase
 
-    rows = [r for r in CAL_TABLE if r.get(path)]
+    rows = [r for r in CAL_TABLE if isinstance(r, dict) and r.get(path)]
     if not rows:
-        print("WARNING: 校准表中无 %s 路径的标定数据，"
-              "请先用 four_state_calibrate() 标定该路径。" % path)
+        _warn_once("cal_path_" + path,
+                   "校准表中无 %s 路径的标定数据（four_state_calibrate 未覆盖该路径），"
+                   "本次返回未校准值。" % path)
         return mag, phase
     rows = sorted(rows, key=lambda r: r["freq"])
 
@@ -187,6 +275,9 @@ def four_state_calibrate(freq, ref_amp_v, measured):
         raise ValueError("四态校准需要恰好 4 个实测状态，"
                          "顺序为 [直连0°, 缓冲0°, 直连90°, 直连180°]，"
                          "收到 %d 个" % len(measured))
+    if any(m[0] <= 0 for m in measured):
+        raise ValueError("四态实测幅值必须为正数，收到 %r"
+                         % ([m[0] for m in measured],))
 
     # 态1=直连0°、态2=缓冲0°、态3=直连90°、态4=直连180°
     direct_idx = (0, 2, 3)      # 直连路径参考状态（取平均，降低单点噪声）
@@ -219,8 +310,69 @@ def four_state_calibrate(freq, ref_amp_v, measured):
             CAL_PATH_BUFFER: (mag_gain_buf, phase_off_buf)}
 
 
+def run_four_state_calibration(freqs, ref_amp_v, measure_state=None, periods=10,
+                               output_path=None, mock=False):
+    """四态校准完整流程：逐频点实测 4 个参考态 -> 填充 CAL_TABLE -> 保存 JSON。
+
+    参考态顺序（与 four_state_calibrate 一致，见 REF_STATE_NAMES）：
+        态0 直连（短接）0°；态1 缓冲（电压跟随）0°；
+        态2 直连 +90°；态3 直连 +180°。
+
+    参数:
+        freqs:        待标定频点列表（Hz），建议与扫频频点一致或取其子集。
+        ref_amp_v:    参考信号幅值（V，已知）。
+        measure_state: callable(freq_hz, state_index) -> (mag_v, phase_deg)。
+                       回调内应先切换参考态（直连/缓冲/+90°/+180° 参考源）再做
+                       一次单点测量；为 None 且 mock=False 时报错（仓库暂无参考态
+                       硬件驱动，真实校准须由调用方提供该回调）。
+        periods:      预留给默认 ps_ctrl 实测路径的积分周期数；当前 real 流程
+                       由 measure_state 回调自行决定测量方式，本参数暂不生效。
+        output_path:  校准表 JSON 保存路径；默认 data/calibration_table.json。
+        mock:         True 时以与参考完全一致的模拟数据跑通全流程（自检/预演），
+                      不依赖任何硬件。
+    返回:
+        results: [(freq, {"direct": (mag_gain, phase_offset_deg),
+                          "buffer": (mag_gain, phase_offset_deg)}), ...]
+        并已把全部频点写入 CAL_TABLE 与 JSON 文件。
+    """
+    path = output_path or CAL_TABLE_DEFAULT_PATH
+    if not freqs:
+        raise ValueError("freqs 不能为空")
+    if ref_amp_v <= 0:
+        raise ValueError("ref_amp_v 必须为正数，收到 %r" % (ref_amp_v,))
+    if measure_state is None and not mock:
+        raise RuntimeError(
+            "四态校准缺少参考态硬件/回调：请提供 measure_state(freq, state_index) -> "
+            "(mag_v, phase_deg) 回调（内部先切换参考态再测量）；或先以 mock=True 预演。"
+            "参考态硬件（直连/缓冲/+90°/+180° 参考源）就绪前无法生成有效校准表。")
+
+    ref_phases = {0: 0.0, 1: 0.0, 2: 90.0, 3: 180.0}
+    results = []
+    for f in freqs:
+        measured = []
+        for st in range(4):
+            if mock:
+                measured.append((ref_amp_v, ref_phases[st]))
+            else:
+                measured.append(measure_state(f, st))
+        res = four_state_calibrate(f, ref_amp_v, measured)
+        results.append((f, res))
+        print("[cal] f=%9.2f Hz | direct gain=%.4f off=%.2f° | "
+              "buffer gain=%.4f off=%.2f°"
+              % (f, res[CAL_PATH_DIRECT][0], res[CAL_PATH_DIRECT][1],
+                 res[CAL_PATH_BUFFER][0], res[CAL_PATH_BUFFER][1]))
+
+    save_calibration_table(path)
+    print("四态校准完成：%d 个频点已写入 CAL_TABLE，校准表已保存至 %s"
+          % (len(freqs), path))
+    return results
+
+
 def save_calibration_table(path):
     """把校准表保存为 JSON 文件，便于上板后归档与复用。"""
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(CAL_TABLE, fh, ensure_ascii=False, indent=2)
 
@@ -271,3 +423,23 @@ if __name__ == "__main__":
     print("直连校准后 -> mag=%.4f, phase=%.2f" % (mc, pc))
     mc2, pc2 = apply_calibration(m, p, 1000.0, path=CAL_PATH_BUFFER)
     print("缓冲校准后 -> mag=%.4f, phase=%.2f" % (mc2, pc2))
+
+    # ---- v3 校准闭环自检：mock 跑通四态校准全流程 + 状态上报 + 重新加载 ----
+    print("\n--- 校准闭环自检（mock=True，不依赖硬件）---")
+    with tempfile.TemporaryDirectory() as tmpd:
+        tmp_path = os.path.join(tmpd, "cal_table_test.json")
+        run_four_state_calibration([500.0, 1000.0, 2000.0], 1.5,
+                                   mock=True, output_path=tmp_path)
+        st = calibration_status()
+        print("校准状态 -> calibrated=%s, 频点数=%d, 范围=%.0f~%.0f Hz, 路径=%s"
+              % (st["calibrated"], st["freq_points"], st["freq_min"],
+                 st["freq_max"], st["paths"]))
+        print("状态说明 -> %s" % st["message"])
+
+        # 模拟"清空后从文件加载"（对应 app.py / gen_dataset.py 扫频前的 ensure 流程）
+        CAL_TABLE.clear()
+        loaded = ensure_calibration_loaded(tmp_path)
+        mc3, pc3 = apply_calibration(m, p, 1000.0, path=CAL_PATH_DIRECT)
+        print("重新加载表(loaded=%s)后 apply_calibration -> mag=%.4f, phase=%.2f"
+              % (loaded, mc3, pc3))
+        print("（期望：mag=1.5000, phase=45.00）")
