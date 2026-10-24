@@ -14,7 +14,8 @@ module top (
     
     output wire        i2s_bclk,
     output wire        i2s_lrclk,
-    output wire        i2s_sdata
+    output wire        i2s_sdata,
+    output wire        au_mclk
 );
 
     // 内部复位生成器 (上电后约 2.5us 拉高，启动系统)
@@ -92,4 +93,12 @@ module top (
             endcase
         end
     end
+
+    // ★ 新增：简单分频器产生约 12.5MHz 的 MCLK
+    reg [2:0] clk_div = 3'd0;  // 加上 = 3'd0
+    always @(posedge clk) begin
+        clk_div <= clk_div + 1;
+    end
+    assign au_mclk = clk_div[2]; // 100MHz / 8 = 12.5MHz
+
 endmodule
