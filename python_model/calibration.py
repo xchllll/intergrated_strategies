@@ -1,40 +1,49 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-calibration.py - 解调后处理与四态校准（幅值/相位还原）
+calibration.py - 解调后处理与四态校准（幅值/相位还原）【口径统一版】
 
-输入：ps_ctrl.read_IQ() 返回的 48 位累加值 acc_I / acc_Q
+输入：ps_ctrl.read_IQ() 返回的 48 位累加值 acc_I / acc_Q，
+     以及本次测量实际使用的积分点数 N（ps_ctrl.measure_once() 的返回值）
 输出：真实物理幅值（V）与相位（度）
 
-定点还原系数与 python_model/demod_sim.py 保持一致：
+归一化口径（与 board/ps_ctrl.py 统一，改模型时必须同步修改）：
     NORM_FACTOR = N * ADC_GAIN * LO_GAIN
-      N        = 100   （积分点数，与 demod_sim.py 同步；若上板后以 top.v
-                        的 10000 拍积分窗口为准，请把 N 改为实际点数）
-      ADC_GAIN = 10000 （模拟 16 位 ADC 的放大倍数）
-      LO_GAIN  = 32767 （DDS 正弦表 16 位满量程）
+      N         = 本次积分点数（== ps_window_max，由 ps_ctrl 按
+                  round(periods * SAMPLE_CLK / f) 计算并原样返回；
+                  【关键】不再使用固定值，否则幅值系统性失真）
+      ADC_GAIN  = ADC 数字化增益：
+                  * 定点模型口径取 10000（模拟 16 位 ADC 的放大倍数）；
+                  * 若直接使用编解码器 16 位采样链路（如 PYNQ 音频
+                    codec），应改为 1.0，并把 ADC_FULL_SCALE_V 设为
+                    codec 输入满量程电压（如 ±1 Vrms）。
+      LO_GAIN   = 32767（DDS 正弦表 16 位满量程）
     I_float = acc_I * 2 / NORM_FACTOR
     Q_float = acc_Q * 2 / NORM_FACTOR
     mag     = hypot(I_float, Q_float) * ADC_FULL_SCALE_V  -> 电压（V）
-    phase   = degrees(atan2(Q_float, I_float))            -> 度，范围 (-180, 180]
+    phase   = degrees(atan2(Q_float, I_float))            -> 度
 
 四态校准：
     每个频点上用 4 个已知参考状态（幅值 A_ref、相位 θ1..θ4）实测后标定：
       mag_gain     = A_ref / mean(measured_mag)     （真实/测得幅值之比）
       phase_offset = 平均回绕相位差 (θ_ref - phase_meas)
-    标定结果写入 CAL_TABLE（按频率排序），apply_calibration() 查表线性插值修正。
-    校准表当前为空：待上板测试后由 four_state_calibrate() 填充，或手动填写。
+    标定结果写入 CAL_TABLE（按频率排序），apply_calibration() 查表线性
+    插值修正。校准表当前为空：待上板测试后由 four_state_calibrate()
+    填充，或手动填写。
 """
 
 import json
 import math
 
 # ---------------------------------------------------------------------------
-# 定点系数（与 python_model/demod_sim.py 单点同步，改动模型时必须同步修改）
+# 定点系数（与 board/ps_ctrl.py 同步；改动模型时必须同步修改）
 # ---------------------------------------------------------------------------
-N = 100             # 积分点数（demod_sim.py 当前取值）
-ADC_GAIN = 10000    # ADC 放大倍数
+# 兜底积分点数：仅当调用方漏传 N 时使用。正常路径一律传
+# ps_ctrl.measure_once() 返回的实际窗长（随频率变化），不得用固定值。
+DEFAULT_INTEGRATION_N = 10000
+
+ADC_GAIN = 10000    # ADC 数字化增益（定点模型口径；codec 直采链路改为 1.0）
 LO_GAIN = 32767     # DDS 正弦表满量程
-NORM_FACTOR = N * ADC_GAIN * LO_GAIN
 
 ADC_FULL_SCALE_V = 1.0   # ADC 满量程电压（V）：按实际前端电路填写，默认 ±1V 占位
 
@@ -66,19 +75,33 @@ def _mean_angle(deg_list):
     return _wrap_180(math.degrees(math.atan2(y, x)))
 
 
+def norm_factor(n):
+    """按实际积分点数 N 计算归一化因子（口径与 ps_ctrl.py 一致）。"""
+    return n * ADC_GAIN * LO_GAIN
+
+
 # ---------------------------------------------------------------------------
 # 对外接口
 # ---------------------------------------------------------------------------
-def calc_mag_phase(I_raw, Q_raw):
+def calc_mag_phase(I_raw, Q_raw, n=None):
     """把 48 位纯整数累加值还原为物理幅值（V）与相位（度）。
 
     参数:
         I_raw, Q_raw: ps_ctrl.read_IQ() 返回的 acc_I / acc_Q。
+        n:            本次实际积分点数（ps_ctrl.measure_once() 返回的
+                      window_n）。缺省时使用 DEFAULT_INTEGRATION_N 兜底，
+                      正常调用必须显式传入。
     返回:
         (mag, phase)：mag 单位 V；phase 单位度，范围 (-180, 180]。
     """
-    i_float = I_raw * 2.0 / NORM_FACTOR
-    q_float = Q_raw * 2.0 / NORM_FACTOR
+    if n is None:
+        n = DEFAULT_INTEGRATION_N
+    if n <= 0:
+        raise ValueError("积分点数 n 必须为正数，收到 %r" % (n,))
+
+    nf = norm_factor(n)
+    i_float = I_raw * 2.0 / nf
+    q_float = Q_raw * 2.0 / nf
     mag = math.hypot(i_float, q_float) * ADC_FULL_SCALE_V
     phase = math.degrees(math.atan2(q_float, i_float))
     return mag, phase
@@ -164,11 +187,13 @@ def load_calibration_table(path):
 if __name__ == "__main__":
     # 自检：用 demod_sim.py 的验收数据验证还原公式
     # 幅值 1.5、相位 45° 的定点累加值（acc_I / acc_Q）来自 demod_sim 定点段
-    acc_I_test = int(round(1.5 * math.cos(math.pi / 4) * NORM_FACTOR / 2.0))
-    acc_Q_test = int(round(1.5 * math.sin(math.pi / 4) * NORM_FACTOR / 2.0))
-    m, p = calc_mag_phase(acc_I_test, acc_Q_test)
-    print("自检：acc_I=%d acc_Q=%d -> mag=%.4f V, phase=%.2f deg"
-          % (acc_I_test, acc_Q_test, m, p))
+    # 这里 N 显式传 100（与 demod_sim.py 的积分点数一致）
+    N_SELFTEST = 100
+    acc_I_test = int(round(1.5 * math.cos(math.pi / 4) * norm_factor(N_SELFTEST) / 2.0))
+    acc_Q_test = int(round(1.5 * math.sin(math.pi / 4) * norm_factor(N_SELFTEST) / 2.0))
+    m, p = calc_mag_phase(acc_I_test, acc_Q_test, N_SELFTEST)
+    print("自检：acc_I=%d acc_Q=%d (N=%d) -> mag=%.4f V, phase=%.2f deg"
+          % (acc_I_test, acc_Q_test, N_SELFTEST, m, p))
     print("期望：mag=1.5000, phase=45.00（与 demod_sim.py 一致）")
 
     mc, pc = apply_calibration(m, p, 1000.0)

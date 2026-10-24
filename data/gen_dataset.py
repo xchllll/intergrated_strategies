@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-gen_dataset.py - 自动化数据集生成（20Hz ~ 20kHz 扫频，240 点）
+gen_dataset.py - 自动化数据集生成（20Hz ~ 20kHz 扫频，240 点）【口径统一版】
 
 目标：在 PYNQ 板子上自动扫频，记录每个频点的幅值（dB，相对 1V 满量程基线）
 与相位（度），带上标签保存为 CSV，供诊断系统/机器学习训练使用。
 
-数据流（复用前两步封装的函数）：
-    ps_ctrl.set_freq / start_measure / read_IQ
-        -> 48 位 acc_I / acc_Q
-    calibration.calc_mag_phase
-        -> 幅值（V）、相位（度）
+数据流（复用 ps_ctrl / calibration 封装的函数）：
+    ps_ctrl.set_freq / set_window / measure_once
+        -> (acc_I, acc_Q, window_n)          # window_n = 实际积分点数 N
+    calibration.calc_mag_phase(acc_I, acc_Q, window_n)
+        -> 幅值（V）、相位（度）             # N 与硬件积分窗长统一
     calibration.apply_calibration
         -> 校准后的真实幅值 / 相位
     输出行: freq,mag,phase,label
@@ -22,11 +22,16 @@ gen_dataset.py - 自动化数据集生成（20Hz ~ 20kHz 扫频，240 点）
        python gen_dataset.py --real
     3) 常用参数：
        --fstart 20 --fstop 20000 --points 240 --cutoff 1000
-       --duration_ms 2.0 --label RC_LPF --output data/dataset_rc_lpf.csv
+       --periods 10 --label RC_LPF --output data/dataset_rc_lpf.csv
 
-注意：mag 列单位为 dB（20*log10(幅值 V / 1V)），phase 列单位为度。
-默认生成的 dataset_rc_lpf.csv 为 dry-run 示例数据，上板实测后请用
---real 重新生成覆盖。
+注意：
+    * mag 列单位为 dB（20*log10(幅值 V / 1V)），phase 列单位为度。
+    * --periods 为每个频点的积分窗覆盖信号周期数（默认 10，正整数），
+      直接决定积分窗长 N = round(periods * SAMPLE_CLK / f) 与测量耗时；
+      低频时 N 较大、单点耗时较长（20Hz、10 周期约 0.5 s）。
+    * 原 --duration_ms 参数已废弃（积分时长由 periods 决定）。
+    默认生成的 dataset_rc_lpf.csv 为 dry-run 示例数据，上板实测后请用
+    --real 重新生成覆盖。
 """
 
 import argparse
@@ -46,6 +51,7 @@ import calibration as cal  # noqa: E402
 
 DEFAULT_LABEL = "RC_LPF"
 DEFAULT_OUTPUT = os.path.join(_HERE, "dataset_rc_lpf.csv")
+DEFAULT_PERIODS = 10
 
 
 def log_spaced_freqs(fstart, fstop, points):
@@ -64,10 +70,14 @@ def simulate_rc_lpf(freq, fc):
     return mag_db, phase_deg
 
 
-def measure_point(freq_hz, duration_ms):
-    """真实采集一个频点：设频 -> 启动测量 -> 读 I/Q -> 还原 -> 校准。"""
-    acc_i, acc_q = ps_ctrl.measure_once(freq_hz, duration_ms)
-    mag, phase = cal.calc_mag_phase(acc_i, acc_q)
+def measure_point(freq_hz, periods):
+    """真实采集一个频点：设频 -> 设窗 -> 启动 -> 读 I/Q -> 还原 -> 校准。
+
+    积分点数 N 由 ps_ctrl.measure_once() 返回并原样传给
+    calibration.calc_mag_phase()，保证归一化口径与硬件积分窗一致。
+    """
+    acc_i, acc_q, window_n = ps_ctrl.measure_once(freq_hz, periods=periods)
+    mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
     mag_cal, phase_cal = cal.apply_calibration(mag, phase, freq_hz)
     mag_db = 20.0 * math.log10(mag_cal) if mag_cal > 0.0 else float("nan")
     return mag_db, phase_cal
@@ -83,8 +93,8 @@ def main():
     parser.add_argument("--points", type=int, default=240, help="扫频点数")
     parser.add_argument("--cutoff", type=float, default=1000.0,
                         help="dry-run 模拟 RC_LPF 的截止频率 Hz")
-    parser.add_argument("--duration_ms", type=float, default=2.0,
-                        help="每个频点 start 保持毫秒数（真实采集用）")
+    parser.add_argument("--periods", type=int, default=DEFAULT_PERIODS,
+                        help="每频点积分窗覆盖的信号周期数（默认 %d）" % DEFAULT_PERIODS)
     parser.add_argument("--label", default=DEFAULT_LABEL, help="数据标签")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="CSV 输出路径")
     args = parser.parse_args()
@@ -95,11 +105,13 @@ def main():
     if not args.real:
         print("[dry-run] 生成模拟 RC_LPF（fc=%.0f Hz）示例数据，仅供格式验证；"
               "上板实测请加 --real 重新生成。" % args.cutoff)
+    else:
+        print("每点积分窗覆盖 %d 个信号周期（N 随频率自动计算）。" % args.periods)
 
     rows = []
     for i, f in enumerate(freqs):
         if args.real:
-            mag_db, phase = measure_point(f, args.duration_ms)
+            mag_db, phase = measure_point(f, args.periods)
         else:
             mag_db, phase = simulate_rc_lpf(f, args.cutoff)
         rows.append([f, mag_db, phase, args.label])
