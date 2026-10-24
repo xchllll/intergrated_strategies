@@ -2,39 +2,21 @@ from flask import Flask, render_template, jsonify, request
 import time
 import sys
 import os
-import csv
 import math
+import csv
+import platform # 新增：用于判断操作系统
 
+# =========================================================
+# 核心路径配置：把仓库里的所有相关文件夹都加进系统路径
+# =========================================================
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+sys.path.insert(0, os.path.join(ROOT_DIR, 'board'))         # ps_ctrl.py
+sys.path.insert(0, os.path.join(ROOT_DIR, 'python_model'))  # calibration.py
+sys.path.insert(0, os.path.join(ROOT_DIR, 'data'))          # gen_dataset.py
 
 app = Flask(__name__)
-
-# =========================================================
-# 【调试模式】读取本地的 CSV 数据（代替假数据）
-# 请把那份 CSV 文件重命名为 data_rc_lpf.csv 并放在 dashboard 文件夹下
-# =========================================================
-CSV_FILE_PATH = os.path.join(os.path.dirname(__file__), "data_rc_lpf.csv")
-
-def read_csv_sweep():
-    freqs = []
-    mags = []
-    phases = []
-    
-    if os.path.exists(CSV_FILE_PATH):
-        with open(CSV_FILE_PATH, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                freqs.append(float(row["freq"]))
-                mags.append(float(row["mag"]))
-                phases.append(float(row["phase"]))
-    else:
-        print(f"警告：找不到 CSV 文件 {CSV_FILE_PATH}，将返回空数据。")
-        
-    return {
-        "freqs": freqs,
-        "mag_db": mags,
-        "phase_deg": phases
-    }
 
 @app.route('/')
 def index():
@@ -47,21 +29,62 @@ def start_sweep():
     
     print(f"\n==== 收到网页扫频指令！缓冲器状态: {use_buffer} ====")
     
-    # 1. 模拟硬件采集耗时
-    time.sleep(1) 
+    clean_data = {"freqs": [], "mag_db": [], "phase_deg": []}
     
-    # 2. 读取数据（目前用本地 CSV 文件，以后换成 T1 硬件调用）
-    clean_data = read_csv_sweep()
-    
-    # 3. 调用 AI 模型
+    # =========================================================
+    # 核心判断：Windows 读 CSV 演示，Linux(板子) 跑真实硬件
+    # =========================================================
+    if platform.system() == 'Windows':
+        print("==== 检测到 Windows 系统，自动切换为 CSV 演示模式 ====")
+        time.sleep(1) 
+        csv_path = os.path.join(ROOT_DIR, "data", "dataset_rc_lpf.csv")
+        if os.path.exists(csv_path):
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    clean_data["freqs"].append(float(row["freq"]))
+                    clean_data["mag_db"].append(float(row["mag"]))
+                    clean_data["phase_deg"].append(float(row["phase"]))
+        else:
+            print(f"!!!! 找不到 CSV: {csv_path}")
+            return jsonify({"status": "error", "msg": "找不到 CSV 文件"}), 500
+            
+    else:
+        print("==== 检测到 PYNQ 环境，开始真实硬件扫频 ====")
+        try:
+            import ps_ctrl
+            import calibration as cal
+            from gen_dataset import log_spaced_freqs
+            
+            cal_path = cal.CAL_PATH_BUFFER if use_buffer else cal.CAL_PATH_DIRECT
+            freqs = log_spaced_freqs(20.0, 20000.0, 240)
+            
+            for f in freqs:
+                acc_i, acc_q, window_n = ps_ctrl.measure_once(f, periods=10)
+                mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
+                mag_cal, phase_cal = cal.apply_calibration(mag, phase, f, path=cal_path)
+                
+                mag_db = 20.0 * math.log10(mag_cal) if mag_cal > 0 else -99.0
+                
+                clean_data["freqs"].append(f)
+                clean_data["mag_db"].append(mag_db)
+                clean_data["phase_deg"].append(phase_cal)
+            print("==== 真实硬件扫频完成！ ====")
+        except Exception as e:
+            print(f"!!!! 扫频过程报错：{e}")
+            return jsonify({"status": "error", "msg": str(e)}), 500
+
+    # =========================================================
+    # AI 识别（Windows 和板子都会走这里）
+    # =========================================================
     ai_result = None
     try:
         from ml.infer import predict_topology
         ai_result = predict_topology(clean_data)
-        print(f"==== AI 识别成功：{ai_result['label']}，置信度：{ai_result['confidence']:.2f} ====")
+        print(f"==== AI 识别成功：{ai_result['label']} ====")
     except Exception as e:
         print(f"!!!! AI 推理报错：{e}")
-        
+
     return jsonify({
         "status": "success",
         "data": clean_data,
