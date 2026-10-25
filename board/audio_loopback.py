@@ -169,14 +169,11 @@ class AudioLoopback:
     def initialize(self) -> None:
         if self._audio is not None:
             return
-        from pynq.overlays.base import BaseOverlay
+        from acceptance import configure_codec
 
-        self._base = BaseOverlay("base.bit")
-        audio = self._base.audio
-        audio.configure(self.sample_rate)
-        audio.select_line_in()
-        audio.set_volume(self.volume)
-        self._audio = audio
+        info = configure_codec()
+        self._base = info["_base"]
+        self._audio = info["_audio"]
 
     def capture(
         self,

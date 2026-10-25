@@ -44,34 +44,41 @@ def _write_codec_register(fd: int, register: int, value: int) -> None:
 def configure_codec() -> dict:
     """Initialize ADAU1761 while the BaseOverlay AXI-IIC is still present."""
     import fcntl
+    from pathlib import Path
 
-    from pynq.overlays.base import BaseOverlay
+    from pynq import Overlay
 
-    base = BaseOverlay("base.bit")
-    audio = getattr(base, "audio", None)
+    base_package = Path(__import__("pynq.overlays.base", fromlist=["base"]).__file__)
+    base = Overlay(str(base_package.parent / "base.bit"))
+    from pynq.ps import Clocks
+
+    if abs(Clocks.fclk0_mhz - 100.0) > 0.01:
+        Clocks.fclk0_mhz = 100.0
+        time.sleep(0.1)
+    audio = getattr(base, "audio_codec_ctrl_0", None)
     if audio is None:
-        from pynq.lib.audio import Audio
-
-        audio = Audio(base)
-    audio.configure(48000)
+        raise RuntimeError("官方 base overlay 未暴露 audio_codec_ctrl_0")
+    audio.iic_index = 1
+    audio.uio_index = __import__("pynq.lib.audio", fromlist=["get_uio_index"]).get_uio_index(
+        "audio-codec-ctrl"
+    )
+    audio.sample_rate = 48000
+    i2c_fd = os.open("/dev/i2c-1", os.O_RDWR)
+    try:
+        fcntl.ioctl(i2c_fd, 0x0703, 0x3B)
+        _write_codec_register(i2c_fd, 0x4000, 0x0E)
+        # 10 MHz MCLK -> 49.152 MHz PLL, written directly to avoid libaudio's
+        # blocking PLL-lock helper on rebooted PYNQ images.
+        os.write(i2c_fd, bytes([0x40, 0x02, 0x02, 0x71, 0x02, 0x3C, 0x21, 0x03]))
+        time.sleep(0.05)
+        _write_codec_register(i2c_fd, 0x4000, 0x0F)
+    finally:
+        os.close(i2c_fd)
+    audio._libaudio.config_audio_codec(audio.iic_index)
     if hasattr(audio, "set_volume"):
         audio.set_volume(60)
     if hasattr(audio, "select_line_in"):
         audio.select_line_in()
-
-    # Audio.configure leaves the DAC playback mixer muted. Re-arm the official
-    # 10 MHz MCLK PLL and enable Mixer3/4 + headphone output for our I2S source.
-    i2c_fd = os.open("/dev/i2c-1", os.O_RDWR)
-    try:
-        fcntl.ioctl(i2c_fd, 0x0703, 0x3B)
-        os.write(i2c_fd, bytes([0x40, 0x02, 0x02, 0x71, 0x02, 0x3C, 0x21, 0x03]))
-        volume = (60 << 2) | 0x03
-        _write_codec_register(i2c_fd, 0x4022, 0x21)
-        _write_codec_register(i2c_fd, 0x4024, 0x41)
-        _write_codec_register(i2c_fd, 0x4029, volume)
-        _write_codec_register(i2c_fd, 0x4030, volume)
-    finally:
-        os.close(i2c_fd)
 
     return {
         "driver": type(audio).__name__,
@@ -87,7 +94,12 @@ def load_design(bit_path: Path, clock_hz: float) -> dict:
     from pynq import Overlay
     from pynq.ps import Clocks
 
-    overlay = Overlay(str(bit_path))
+    design_path = bit_path
+    if bit_path.suffix.lower() == ".bit":
+        xsa_candidate = bit_path.with_suffix(".xsa")
+        if xsa_candidate.is_file():
+            design_path = xsa_candidate
+    overlay = Overlay(str(design_path))
     before_mhz = Clocks.fclk0_mhz
     requested_mhz = clock_hz / 1_000_000.0
     if abs(before_mhz - requested_mhz) > 0.01:
@@ -100,7 +112,8 @@ def load_design(bit_path: Path, clock_hz: float) -> dict:
             % (requested_mhz, actual_mhz)
         )
     return {
-        "overlay": overlay,
+        "_overlay": overlay,
+        "loaded_path": str(design_path),
         "clock_before_mhz": before_mhz,
         "clock_actual_mhz": actual_mhz,
     }
@@ -187,7 +200,7 @@ def main() -> int:
         default="auto",
     )
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--clock-hz", type=float, default=50_000_000)
+    parser.add_argument("--clock-hz", type=float, default=100_000_000)
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--skip-codec-init", action="store_true")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)

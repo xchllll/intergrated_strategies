@@ -30,8 +30,8 @@ ps_ctrl.py - PS 侧硬件控制驱动（PYNQ-Z2 / Zynq-7000）【溢出防护版
     measure_once() 原样返回，调用方必须把它传给
     calibration.calc_mag_phase(acc_I, acc_Q, N)。
     FPGA_CLK_HZ 是 PL 系统时钟，AUDIO_SAMPLE_RATE_HZ 是 I2S 每声道
-    样本率。当前 I2S 每帧 2048 个 FPGA 时钟，50 MHz 时采样率
-    24414.0625 Hz。解调累加与积分窗都按有效 ADC 样本计数。
+    样本率。当前 I2S 每帧 2048 个 FPGA 时钟，100 MHz 时采样率
+    48828.125 Hz。解调累加与积分窗都按有效 ADC 样本计数。
 
 【48 位累加器溢出防护】（v2 新增）
     demod.v 的 acc_I / acc_Q 是 48 位有符号累加器，满量程上限
@@ -78,7 +78,7 @@ REG_GPIO_DATA = 0x00           # channel 1 数据寄存器
 REG_GPIO2_DATA = 0x08          # channel 2 数据寄存器
 
 # 系统参数
-FPGA_CLK_HZ = float(os.environ.get("PYNQ_FPGA_CLK_HZ", "50000000"))
+FPGA_CLK_HZ = float(os.environ.get("PYNQ_FPGA_CLK_HZ", "100000000"))
 if FPGA_CLK_HZ <= 0:
     raise ValueError("PYNQ_FPGA_CLK_HZ 必须为正数，当前为 %r" % FPGA_CLK_HZ)
 

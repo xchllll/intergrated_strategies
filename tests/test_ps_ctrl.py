@@ -85,7 +85,7 @@ class PsCtrlTests(unittest.TestCase):
         self.assertFalse(self.state["start"])
 
     def test_delivered_bitstream_clock_matches_default(self):
-        self.assertEqual(ps_ctrl.SAMPLE_CLK, 50e6)
+        self.assertEqual(ps_ctrl.SAMPLE_CLK, 100e6)
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ import traceback
 
 result = {"ok": False, "steps": []}
 clock_changed = False
-requested_clock_hz = 50000000
+requested_clock_hz = 100000000
 input_mode = "line"
 window_cycles = 2.0
 freq_hz = 1000
@@ -225,7 +225,7 @@ def execute(
         "execute_request",
         content={
             "code": PAYLOAD.replace(
-                "requested_clock_hz = 50000000",
+                "requested_clock_hz = 100000000",
                 "requested_clock_hz = %d" % clock_hz,
                 1,
             ).replace(
@@ -317,7 +317,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://192.168.2.99:9090")
     parser.add_argument("--password", default="xilinx")
-    parser.add_argument("--clock-hz", type=int, default=50_000_000)
+    parser.add_argument("--clock-hz", type=int, default=100_000_000)
     parser.add_argument("--input", choices=("line", "mic"), default="line")
     parser.add_argument("--cycles", type=float, default=2.0)
     parser.add_argument("--freq-hz", type=float, default=1000.0)

@@ -22,8 +22,8 @@ class AcceptanceAssetTests(unittest.TestCase):
     def test_xsa_clock_matches_ps_ctrl_default(self):
         with zipfile.ZipFile(acceptance.XSA_PATH) as archive:
             hardware_xml = archive.read("design_1.hwh").decode("utf-8")
-        self.assertIn('CLKFREQUENCY="50000000"', hardware_xml)
-        self.assertEqual(ps_ctrl.SAMPLE_CLK, 50e6)
+        self.assertIn('CLKFREQUENCY="100000000"', hardware_xml)
+        self.assertEqual(ps_ctrl.SAMPLE_CLK, 100e6)
 
 
 if __name__ == "__main__":

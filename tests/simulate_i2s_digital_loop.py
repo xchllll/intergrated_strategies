@@ -22,7 +22,7 @@ def signed48(value: int) -> int:
     return value - (1 << 48) if value & (1 << 47) else value
 
 
-def run(clock_hz: float = 50_000_000, freq_hz: float = 1000.0,
+def run(clock_hz: float = 100_000_000, freq_hz: float = 1000.0,
         sample_count_target: int = 244) -> dict:
     rom = [signed16(int(line.strip(), 16)) for line in SINE_MEM.read_text().splitlines()]
     phase_inc = round(freq_hz * (1 << 32) / clock_hz)

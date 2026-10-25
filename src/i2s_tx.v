@@ -20,7 +20,9 @@ module i2s_tx (
             clk_div     <= 5'd0;
             bit_index   <= 5'd0;
             bclk_fall_d <= 1'b0;
-            audio_latched <= 16'd0;
+            // Left channel starts immediately after reset. Preload it so the
+            // first transmitted frame is not a zero sample.
+            audio_latched <= audio_data_L;
             bclk        <= 1'b0;
             lrclk       <= 1'b1;
             sdata       <= 1'b0;

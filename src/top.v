@@ -109,17 +109,17 @@ module top (
     end
 
     // ADU1761 PLL is configured for a 10 MHz MCLK reference.
-    // The delivered XSA uses FCLK_CLK0 = 50 MHz, so a 5-cycle pattern
-    // (3 high / 2 low) produces 10 MHz without requiring another clock.
-    reg [2:0] mclk_div = 3'd0;
+    // FCLK_CLK0 = 100 MHz, so a 10-cycle pattern (5 high / 5 low)
+    // produces 10 MHz MCLK while the I2S divider keeps ~48.8 kSa/s.
+    reg [3:0] mclk_div = 4'd0;
     always @(posedge clk) begin
         if (!sys_rst_n)
-            mclk_div <= 3'd0;
-        else if (mclk_div == 3'd4)
-            mclk_div <= 3'd0;
+            mclk_div <= 4'd0;
+        else if (mclk_div == 4'd9)
+            mclk_div <= 4'd0;
         else
             mclk_div <= mclk_div + 1'b1;
     end
-    assign au_mclk = (mclk_div < 3'd3);
+    assign au_mclk = (mclk_div < 4'd5);
 
 endmodule

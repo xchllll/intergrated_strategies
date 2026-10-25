@@ -1,5 +1,4 @@
 # PYNQ-Z2 PL system clock supplied by processing_system7_0 FCLK_CLK0.
-create_clock -period 20.000 -name clk -waveform {0.000 10.000} [get_ports clk]
 
 # ADAU1761 I2S pins (same mapping as the PYNQ-Z2 reference design).
 set_property PACKAGE_PIN R18 [get_ports i2s_bclk_0]
