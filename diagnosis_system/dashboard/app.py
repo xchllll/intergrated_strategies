@@ -18,6 +18,8 @@ app = Flask(__name__)
 
 DEMO_CSV = ROOT_DIR / "data" / "dataset_rc_lpf.csv"
 SWEEP_POINTS = 240
+AUDIO_SWEEP_POINTS = 12
+AUDIO_LOOPBACK_DRIVER = None
 
 
 def _runtime_source() -> dict:
@@ -30,10 +32,10 @@ def _runtime_source() -> dict:
             "detail": str(DEMO_CSV.relative_to(ROOT_DIR)),
         }
     return {
-        "mode": "pynq_hardware",
+        "mode": "pynq_audio_loopback",
         "is_real": True,
-        "label": "PYNQ 硬件采集",
-        "detail": "HP+MIC -> DUT -> LINE IN",
+        "label": "PYNQ 官方音频闭环实测",
+        "detail": "DDS 音频激励 -> HP+MIC -> LINE IN -> 48 kHz 采样",
     }
 
 
@@ -71,7 +73,7 @@ def _log_spaced_freqs(start_hz: float, stop_hz: float, count: int) -> list[float
     return [start_hz * ratio**index for index in range(count)]
 
 
-def _run_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
+def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     import calibration as cal
     import ps_ctrl
 
@@ -102,6 +104,69 @@ def _run_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     if not data["freqs"]:
         raise RuntimeError("硬件扫频没有返回任何频点")
     return data, cal_status, warnings
+
+
+def _log_frequencies(start_hz: float, stop_hz: float, count: int) -> list[float]:
+    if start_hz <= 0 or stop_hz <= start_hz or count < 2:
+        raise ValueError("音频扫频范围或点数无效")
+    step = math.log(stop_hz / start_hz) / (count - 1)
+    return [start_hz * math.exp(index * step) for index in range(count)]
+
+
+def _get_audio_driver():
+    global AUDIO_LOOPBACK_DRIVER
+    from audio_loopback import AudioLoopback
+
+    if AUDIO_LOOPBACK_DRIVER is None:
+        AUDIO_LOOPBACK_DRIVER = AudioLoopback()
+        AUDIO_LOOPBACK_DRIVER.initialize()
+    return AUDIO_LOOPBACK_DRIVER
+
+
+def _run_audio_loopback_sweep() -> tuple[dict, dict, list[str]]:
+    """Measure real 1k-class loopback points through the official PYNQ codec."""
+    import calibration as cal
+
+    cal.ensure_calibration_loaded()
+    calibration = cal.calibration_status()
+    warnings = []
+    if not calibration.get("calibrated"):
+        warnings.append(
+            "校准表为空；曲线为官方音频闭环的未校准原始测量。"
+        )
+
+    data = {"freqs": [], "mag_db": [], "phase_deg": []}
+    driver = _get_audio_driver()
+    for freq in _log_frequencies(100.0, 10000.0, AUDIO_SWEEP_POINTS):
+        measurement = driver.capture(freq)
+        if (
+            measurement["peak_bin_ratio"] < 50.0
+            or abs(measurement["frequency_error_hz"]) > max(30.0, freq * 0.02)
+        ):
+            warnings.append("跳过无效频点 %.1f Hz" % freq)
+            continue
+        magnitude = measurement["amplitude_full_scale"]
+        phase = measurement["phase_deg"]
+        magnitude, phase = cal.apply_calibration(
+            magnitude,
+            phase,
+            freq,
+            path=cal.CAL_PATH_DIRECT,
+        )
+        data["freqs"].append(float(freq))
+        data["mag_db"].append(
+            20.0 * math.log10(magnitude) if magnitude > 0.0 else -99.0
+        )
+        data["phase_deg"].append(float(phase))
+    if not data["freqs"]:
+        raise RuntimeError("音频闭环扫频没有得到任何有效频点")
+    return data, calibration, warnings
+
+
+def _run_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
+    if use_buffer:
+        return _run_rtl_hardware_sweep(use_buffer)
+    return _run_audio_loopback_sweep()
 
 
 def _run_ai(data: dict, is_real: bool) -> tuple[dict | None, str | None]:
@@ -138,9 +203,42 @@ def status():
             "status": "success",
             "source": source,
             "calibration": calibration,
-            "points": SWEEP_POINTS,
+            "points": (
+                AUDIO_SWEEP_POINTS
+                if source["mode"] == "pynq_audio_loopback"
+                else SWEEP_POINTS
+            ),
         }
     )
+
+
+@app.route("/api/iq", methods=["GET"])
+def iq_acceptance():
+    source = _runtime_source()
+    if source["mode"] != "pynq_audio_loopback":
+        return jsonify(
+            {
+                "status": "error",
+                "msg": "当前不是 PYNQ 官方音频闭环环境",
+            }
+        ), 400
+    try:
+        frequency_hz = float(request.args.get("freq", "1000"))
+        repeats = max(1, min(int(request.args.get("repeats", "3")), 5))
+        measurement = _get_audio_driver().measure_repeated(
+            frequency_hz,
+            repeats=repeats,
+        )
+        return jsonify(
+            {
+                "status": "success",
+                "source": source,
+                "measurement": measurement,
+            }
+        )
+    except Exception as exc:
+        app.logger.exception("I/Q 验收失败")
+        return jsonify({"status": "error", "msg": str(exc)}), 500
 
 
 @app.route("/api/start_sweep", methods=["POST"])
@@ -172,7 +270,7 @@ def start_sweep():
         "ai": ai_result,
         "warnings": [],
     }
-    if source["mode"] == "pynq_hardware":
+    if source["mode"] in ("pynq_hardware", "pynq_audio_loopback"):
         response["warnings"].extend(sweep_warnings)
     if ai_error:
         response["warnings"].append("AI 推理未完成：%s" % ai_error)
@@ -188,4 +286,9 @@ def start_sweep():
 
 
 if __name__ == "__main__":
+    if platform.system() != "Windows":
+        from audio_loopback import AudioLoopback
+
+        AUDIO_LOOPBACK_DRIVER = AudioLoopback()
+        AUDIO_LOOPBACK_DRIVER.initialize()
     app.run(host="0.0.0.0", port=5000, debug=False)

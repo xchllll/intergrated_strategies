@@ -24,14 +24,14 @@ ps_ctrl.py - PS 侧硬件控制驱动（PYNQ-Z2 / Zynq-7000）【溢出防护版
     phase_inc = round(f_out * 2^32 / FCLK)
 
 积分窗口口径（与 python_model/calibration.py 统一）：
-    N = ps_window_max = round(periods * SAMPLE_CLK / f_out)
+    N = ps_window_max = round(periods * AUDIO_SAMPLE_RATE_HZ / f_out)
     即积分窗覆盖 periods 个完整信号周期：混频产生的 2f 分量在整数周期内
     平均为 0，低频测量不失真；N 同时是 calibration 的归一化点数，由
     measure_once() 原样返回，调用方必须把它传给
     calibration.calc_mag_phase(acc_I, acc_Q, N)。
-    SAMPLE_CLK 是解调采样时钟：当前交付的 XSA 中 FCLK_CLK0 为 50 MHz。
-    将来接入 I2S RX（编解码器采样，如 48 kHz）时，把 SAMPLE_CLK
-    改为编解码器采样率即可，公式不变。
+    FPGA_CLK_HZ 是 PL 系统时钟，AUDIO_SAMPLE_RATE_HZ 是 I2S 每声道
+    样本率。当前 I2S 每帧 2048 个 FPGA 时钟，50 MHz 时采样率
+    24414.0625 Hz。解调累加与积分窗都按有效 ADC 样本计数。
 
 【48 位累加器溢出防护】（v2 新增）
     demod.v 的 acc_I / acc_Q 是 48 位有符号累加器，满量程上限
@@ -78,9 +78,22 @@ REG_GPIO_DATA = 0x00           # channel 1 数据寄存器
 REG_GPIO2_DATA = 0x08          # channel 2 数据寄存器
 
 # 系统参数
-SAMPLE_CLK = float(os.environ.get("PYNQ_DEMOD_CLK_HZ", "50000000"))
-if SAMPLE_CLK <= 0:
-    raise ValueError("PYNQ_DEMOD_CLK_HZ 必须为正数，当前为 %r" % SAMPLE_CLK)
+FPGA_CLK_HZ = float(os.environ.get("PYNQ_FPGA_CLK_HZ", "50000000"))
+if FPGA_CLK_HZ <= 0:
+    raise ValueError("PYNQ_FPGA_CLK_HZ 必须为正数，当前为 %r" % FPGA_CLK_HZ)
+
+# i2s_tx creates one stereo frame every 2048 FPGA clocks:
+# 2 channels * 32 bits * 32 clocks/bit.
+AUDIO_SAMPLE_RATE_HZ = float(
+    os.environ.get("PYNQ_AUDIO_SAMPLE_RATE_HZ", str(FPGA_CLK_HZ / 2048.0))
+)
+if AUDIO_SAMPLE_RATE_HZ <= 0:
+    raise ValueError(
+        "PYNQ_AUDIO_SAMPLE_RATE_HZ 必须为正数，当前为 %r" % AUDIO_SAMPLE_RATE_HZ
+    )
+
+# Kept as a compatibility alias for existing imports.
+SAMPLE_CLK = FPGA_CLK_HZ
 REG_RANGE = 0x1000             # AXI GPIO 地址段长度（4096 字节）
 
 # 测量参数
@@ -97,7 +110,7 @@ ADC_FULL_SCALE_16BIT = 32767                      # 输入信号最坏情况（�
 # 同相满量程单点相干积分贡献 ≈ A_ADC * A_LO / 2；留 20% 裕量，得到安全点数上限：
 SAFE_MAX_N = int(0.8 * ACC_FULL_SCALE / (ADC_FULL_SCALE_16BIT * LO_GAIN / 2.0))
 # 仅靠减小 periods 即可保证安全的频率下限（periods=1 时 N 仍 ≤ SAFE_MAX_N）：
-SAFE_MIN_FREQ_HZ = SAMPLE_CLK / SAFE_MAX_N        # 50 MHz 时约 239 Hz
+SAFE_MIN_FREQ_HZ = AUDIO_SAMPLE_RATE_HZ / SAFE_MAX_N
 
 _mmio_cache = {}
 
@@ -122,11 +135,11 @@ def _to_signed_48(value):
 def _safe_periods(freq_hz, periods):
     """把 periods 限制到 48 位累加器安全范围内（满量程最坏情况），返回 ≥1 的值。
 
-    低频时单个信号周期的采样点数 N_period = SAMPLE_CLK/f 可能很大，
+    低频时单个信号周期的采样点数 N_period = AUDIO_SAMPLE_RATE_HZ/f 可能很大，
     必须压低 periods 使 N = periods * N_period ≤ SAFE_MAX_N，
     避免 acc_I/acc_Q 溢出 48 位有符号上限（溢出后数据不可用）。
     """
-    n_per_period = SAMPLE_CLK / freq_hz
+    n_per_period = AUDIO_SAMPLE_RATE_HZ / freq_hz
     safe_p = int(SAFE_MAX_N / n_per_period)   # 满足安全条件的最多整数周期数
     return max(1, min(periods, safe_p))
 
@@ -141,12 +154,12 @@ def set_freq(freq_hz):
     """
     if freq_hz <= 0:
         raise ValueError("freq_hz 必须为正数，收到 %r" % freq_hz)
-    if freq_hz >= SAMPLE_CLK / 2.0:
+    if freq_hz >= AUDIO_SAMPLE_RATE_HZ / 2.0:
         raise ValueError(
-            "freq_hz 必须小于 SAMPLE_CLK/2 = %.1f Hz（奈奎斯特限制）"
-            % (SAMPLE_CLK / 2.0))
+            "freq_hz 必须小于音频采样率/2 = %.1f Hz（奈奎斯特限制）"
+            % (AUDIO_SAMPLE_RATE_HZ / 2.0))
 
-    phase_inc = int(round(freq_hz * (2.0 ** 32) / SAMPLE_CLK))
+    phase_inc = int(round(freq_hz * (2.0 ** 32) / FPGA_CLK_HZ))
     phase_inc &= 0xFFFFFFFF
 
     _get_mmio(AXI_GPIO_0_BASE).write(REG_GPIO_DATA, phase_inc)
@@ -156,7 +169,7 @@ def set_freq(freq_hz):
 def set_window(freq_hz, periods=DEFAULT_PERIODS, auto_safe=True):
     """按"整数个信号周期"设置积分窗长并写入 axi_gpio_1。
 
-    窗长 N = round(periods * SAMPLE_CLK / freq_hz)，表示解调积分窗覆盖
+    窗长 N = round(periods * AUDIO_SAMPLE_RATE_HZ / freq_hz)，表示解调积分窗覆盖
     periods 个完整信号周期（2f 分量在整数周期内平均为 0，低频精度有保证）。
     N 同时作为 calibration 的归一化点数，返回给调用方。
 
@@ -179,13 +192,13 @@ def set_window(freq_hz, periods=DEFAULT_PERIODS, auto_safe=True):
             print("WARNING: 为防 48bit 累加器溢出（满量程最坏情况），"
                   "积分周期数 %d -> %d（f=%.1f Hz）"
                   % (periods, used_periods, freq_hz))
-        if used_periods == 1 and SAMPLE_CLK / freq_hz > SAFE_MAX_N:
+        if used_periods == 1 and AUDIO_SAMPLE_RATE_HZ / freq_hz > SAFE_MAX_N:
             print("WARNING: f=%.1f Hz 时即使 1 个信号周期也超过 48bit 累加器"
                   "安全上限（满量程输入，N=%.0f > SAFE_MAX_N=%d）；"
                   "建议前端衰减/输入缩放，或硬件扩位宽/降本振。"
-                  % (freq_hz, SAMPLE_CLK / freq_hz, SAFE_MAX_N))
+                  % (freq_hz, AUDIO_SAMPLE_RATE_HZ / freq_hz, SAFE_MAX_N))
 
-    n = int(round(used_periods * SAMPLE_CLK / freq_hz))
+    n = int(round(used_periods * AUDIO_SAMPLE_RATE_HZ / freq_hz))
     if n < 1:
         raise ValueError("积分窗长 N=%d < 1：请增大 periods 或降低频率" % n)
     if n > 0xFFFFFFFF:
@@ -254,7 +267,7 @@ def measure_once(freq_hz, periods=DEFAULT_PERIODS, margin_s=1e-3,
     window_n = set_window(freq_hz, periods)
 
     # 超时时间 = 积分时长 + 裕量；以 DONE 寄存器为准，不再盲等固定时长。
-    timeout_s = max(window_n / SAMPLE_CLK + margin_s, MIN_HOLD_S)
+    timeout_s = max(window_n / AUDIO_SAMPLE_RATE_HZ + margin_s, MIN_HOLD_S)
 
     gpio = _get_mmio(AXI_GPIO_0_BASE)
     gpio.write(REG_GPIO2_DATA, 0x1)          # 拉高 start
@@ -266,9 +279,9 @@ def measure_once(freq_hz, periods=DEFAULT_PERIODS, margin_s=1e-3,
                 return acc_i, acc_q, window_n
             time.sleep(poll_interval_s)
         raise RuntimeError(
-            "等待 out_done 超时（%.3f s，N=%d，f=%.1f Hz，clk=%.0f Hz）；"
+            "等待 out_done 超时（%.3f s，N=%d，f=%.1f Hz，fs=%.1f Hz）；"
             "请检查 bitstream、FCLK_CLK0、AXI GPIO 地址和 ps_start 接线。"
-            % (timeout_s, window_n, freq_hz, SAMPLE_CLK))
+            % (timeout_s, window_n, freq_hz, AUDIO_SAMPLE_RATE_HZ))
     finally:
         gpio.write(REG_GPIO2_DATA, 0x0)      # 拉低 start -> 回 IDLE
 
@@ -289,7 +302,8 @@ if __name__ == "__main__":
     phase_inc = set_freq(args.freq)
     window_n = set_window(args.freq, args.periods)
     print("phase_inc = 0x%08X (%d)" % (phase_inc, phase_inc))
-    print("ps_window_max = %d 拍 (%.3f ms)" % (window_n, window_n / SAMPLE_CLK * 1e3))
+    print("ps_window_max = %d 个 ADC 样本 (%.3f ms)"
+          % (window_n, window_n / AUDIO_SAMPLE_RATE_HZ * 1e3))
     try:
         acc_i, acc_q, n = measure_once(args.freq, args.periods)
         print("acc_I = %d" % acc_i)

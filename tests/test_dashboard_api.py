@@ -28,6 +28,12 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(result["source"]["mode"], "demo_csv")
         self.assertFalse(result["source"]["is_real"])
 
+    def test_iq_endpoint_does_not_fake_hardware_on_windows(self):
+        response = self.client.get("/api/iq?freq=1000&repeats=1")
+        result = response.get_json()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(result["status"], "error")
+
     def test_demo_sweep_returns_full_curve_and_explicit_warning(self):
         fake_ai = {
             "label": "RC 低通滤波器（演示）",

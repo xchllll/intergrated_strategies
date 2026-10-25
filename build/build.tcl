@@ -24,7 +24,7 @@
 #    (Please see the '$orig_proj_dir' and '$origin_dir' variable setting below at the start of the script)
 #
 #    "D:/.integrated_strategies/project/dds_sim/dds_sim.srcs/sources_1/bd/design_1/design_1.bd"
-#    "D:/.integrated_strategies/project/dds_sim/dds_sim.srcs/constrs_1/new/top.xdc"
+#    "constraints/top.xdc"
 #    "D:/.integrated_strategies/project/dds_sim/dds_wave.wcfg"
 #    "D:/.integrated_strategies/project/dds_sim/tb_sweep_behav.wcfg"
 #    "D:/.integrated_strategies/project/dds_sim/dds_sim.srcs/utils_1/imports/synth_1/top.dcp"
@@ -32,7 +32,6 @@
 # 3. The following remote source files that were added to the original project:-
 #
 #    "D:/.integrated_strategies/src/sine.mem"
-#    "D:/.integrated_strategies/src/sweep_ctrl.v"
 #    "D:/.integrated_strategies/src/dds.v"
 #    "D:/.integrated_strategies/src/demod.v"
 #    "D:/.integrated_strategies/src/i2s_tx.v"
@@ -50,7 +49,7 @@ proc checkRequiredFiles { origin_dir} {
   set status true
   set files [list \
  "[file normalize "$origin_dir/project/dds_sim/dds_sim.srcs/sources_1/bd/design_1/design_1.bd"]"\
- "[file normalize "$origin_dir/project/dds_sim/dds_sim.srcs/constrs_1/new/top.xdc"]"\
+ "[file normalize "$origin_dir/constraints/top.xdc"]"\
  "[file normalize "$origin_dir/project/dds_sim/dds_wave.wcfg"]"\
  "[file normalize "$origin_dir/project/dds_sim/tb_sweep_behav.wcfg"]"\
  "[file normalize "$origin_dir/project/dds_sim/dds_sim.srcs/utils_1/imports/synth_1/top.dcp"]"\
@@ -64,7 +63,6 @@ proc checkRequiredFiles { origin_dir} {
 
   set files [list \
  "[file normalize "$origin_dir/src/sine.mem"]"\
- "[file normalize "$origin_dir/src/sweep_ctrl.v"]"\
  "[file normalize "$origin_dir/src/dds.v"]"\
  "[file normalize "$origin_dir/src/demod.v"]"\
  "[file normalize "$origin_dir/src/i2s_tx.v"]"\
@@ -203,7 +201,6 @@ if {[string equal [get_filesets -quiet sources_1] ""]} {
 set obj [get_filesets sources_1]
 set files [list \
  [file normalize "${origin_dir}/src/sine.mem"] \
- [file normalize "${origin_dir}/src/sweep_ctrl.v"] \
  [file normalize "${origin_dir}/src/dds.v"] \
  [file normalize "${origin_dir}/src/demod.v"] \
  [file normalize "${origin_dir}/src/i2s_tx.v"] \
@@ -257,7 +254,7 @@ if {[string equal [get_filesets -quiet constrs_1] ""]} {
 set obj [get_filesets constrs_1]
 
 # Add/Import constrs file and set constrs file properties
-set file "[file normalize "$origin_dir/project/dds_sim/dds_sim.srcs/constrs_1/new/top.xdc"]"
+set file "[file normalize "$origin_dir/constraints/top.xdc"]"
 set file_imported [import_files -fileset constrs_1 [list $file]]
 set file "new/top.xdc"
 set file_obj [get_files -of_objects [get_filesets constrs_1] [list "*$file"]]

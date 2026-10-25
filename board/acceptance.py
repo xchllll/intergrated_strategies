@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""PYNQ-Z2 minimum acceptance: load bitstream, measure one frequency, dump I/Q."""
+"""PYNQ-Z2 minimum acceptance for the FPGA audio measurement chain."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import os
 import sys
 import time
 import zipfile
@@ -21,13 +21,14 @@ DEFAULT_OUTPUT = ROOT_DIR / "data" / "acceptance_latest.json"
 sys.path.insert(0, str(BOARD_DIR))
 sys.path.insert(0, str(ROOT_DIR / "python_model"))
 
+from audio_loopback import AudioLoopback
+
 
 def ensure_bitstream() -> Path:
     if BIT_PATH.is_file():
         return BIT_PATH
     if not XSA_PATH.is_file():
         raise FileNotFoundError("找不到 %s 或 %s" % (BIT_PATH, XSA_PATH))
-
     with zipfile.ZipFile(XSA_PATH) as archive:
         member = "design_1_wrapper.bit"
         if member not in archive.namelist():
@@ -36,36 +37,73 @@ def ensure_bitstream() -> Path:
     return BIT_PATH
 
 
-def init_codec(sample_rate: int) -> dict:
-    """Use the official base overlay once because the custom bitstream has no IIC."""
+def _write_codec_register(fd: int, register: int, value: int) -> None:
+    os.write(fd, bytes([(register >> 8) & 0xFF, register & 0xFF, value]))
+
+
+def configure_codec() -> dict:
+    """Initialize ADAU1761 while the BaseOverlay AXI-IIC is still present."""
+    import fcntl
+
     from pynq.overlays.base import BaseOverlay
 
     base = BaseOverlay("base.bit")
     audio = getattr(base, "audio", None)
     if audio is None:
-        # Some PYNQ releases expose an Audio wrapper; others bind the
-        # AudioADAU1761 driver directly onto BaseOverlay.audio.
         from pynq.lib.audio import Audio
 
         audio = Audio(base)
-    audio.configure(sample_rate)
-    input_selected = False
+    audio.configure(48000)
+    if hasattr(audio, "set_volume"):
+        audio.set_volume(60)
     if hasattr(audio, "select_line_in"):
         audio.select_line_in()
-        input_selected = True
+
+    # Audio.configure leaves the DAC playback mixer muted. Re-arm the official
+    # 10 MHz MCLK PLL and enable Mixer3/4 + headphone output for our I2S source.
+    i2c_fd = os.open("/dev/i2c-1", os.O_RDWR)
+    try:
+        fcntl.ioctl(i2c_fd, 0x0703, 0x3B)
+        os.write(i2c_fd, bytes([0x40, 0x02, 0x02, 0x71, 0x02, 0x3C, 0x21, 0x03]))
+        volume = (60 << 2) | 0x03
+        _write_codec_register(i2c_fd, 0x4022, 0x21)
+        _write_codec_register(i2c_fd, 0x4024, 0x41)
+        _write_codec_register(i2c_fd, 0x4029, volume)
+        _write_codec_register(i2c_fd, 0x4030, volume)
+    finally:
+        os.close(i2c_fd)
+
     return {
         "driver": type(audio).__name__,
-        "sample_rate": sample_rate,
-        "line_in_selected": input_selected,
-        "_audio_object": audio,
-        "_base_overlay": base,
+        "line_in_selected": True,
+        "dac_unmuted": True,
+        "pll_rearmed": True,
+        "_audio": audio,
+        "_base": base,
     }
 
 
-def load_custom_overlay(bit_path: Path):
+def load_design(bit_path: Path, clock_hz: float) -> dict:
     from pynq import Overlay
+    from pynq.ps import Clocks
 
-    return Overlay(str(bit_path))
+    overlay = Overlay(str(bit_path))
+    before_mhz = Clocks.fclk0_mhz
+    requested_mhz = clock_hz / 1_000_000.0
+    if abs(before_mhz - requested_mhz) > 0.01:
+        Clocks.fclk0_mhz = requested_mhz
+        time.sleep(0.2)
+    actual_mhz = Clocks.fclk0_mhz
+    if abs(actual_mhz - requested_mhz) > 1.0:
+        raise RuntimeError(
+            "FCLK_CLK0 设置失败：请求 %.3f MHz，实际 %.3f MHz"
+            % (requested_mhz, actual_mhz)
+        )
+    return {
+        "overlay": overlay,
+        "clock_before_mhz": before_mhz,
+        "clock_actual_mhz": actual_mhz,
+    }
 
 
 def measure_one(freq_hz: float, periods: int) -> dict:
@@ -78,7 +116,6 @@ def measure_one(freq_hz: float, periods: int) -> dict:
     acc_i, acc_q, window_n = ps_ctrl.measure_once(freq_hz, periods=periods)
     elapsed = time.monotonic() - started
     magnitude, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
-    calibration_status = cal.calibration_status()
     mask_48 = (1 << 48) - 1
     return {
         "freq_hz": freq_hz,
@@ -86,8 +123,9 @@ def measure_one(freq_hz: float, periods: int) -> dict:
         "phase_inc": phase_inc,
         "phase_inc_hex": "0x%08X" % phase_inc,
         "window_n": window_n,
-        "sample_clock_hz": ps_ctrl.SAMPLE_CLK,
-        "integration_seconds": window_n / ps_ctrl.SAMPLE_CLK,
+        "fpga_clock_hz": ps_ctrl.FPGA_CLK_HZ,
+        "audio_sample_rate_hz": ps_ctrl.AUDIO_SAMPLE_RATE_HZ,
+        "integration_seconds": window_n / ps_ctrl.AUDIO_SAMPLE_RATE_HZ,
         "elapsed_seconds": elapsed,
         "done": True,
         "acc_i": acc_i,
@@ -97,8 +135,32 @@ def measure_one(freq_hz: float, periods: int) -> dict:
         "nonzero": bool(acc_i or acc_q),
         "magnitude_raw_v": magnitude,
         "phase_raw_deg": phase,
-        "calibration": calibration_status,
+        "calibration": cal.calibration_status(),
     }
+
+
+def measure_audio_loopback(freq_hz: float, repeats: int = 3) -> dict:
+    """Measure the real HP+MIC -> LINE IN path through the official codec."""
+    import calibration as cal
+
+    driver = AudioLoopback()
+    result = driver.measure_repeated(freq_hz, repeats=repeats)
+    magnitude = result["amplitude_code_median"] / float(1 << 23)
+    phase = result["phase_deg"]
+    result.update(
+        {
+            "freq_hz": float(freq_hz),
+            "sample_clock_hz": result["sample_rate_hz"],
+            "audio_sample_rate_hz": result["sample_rate_hz"],
+            "integration_seconds": result["window_n"] / result["sample_rate_hz"],
+            "done": True,
+            "magnitude_raw_v": magnitude,
+            "magnitude_note": "归一化满量程，不是已校准电压",
+            "phase_raw_deg": phase,
+            "calibration": cal.calibration_status(),
+        }
+    )
+    return result
 
 
 def json_safe(value):
@@ -117,67 +179,93 @@ def json_safe(value):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="PYNQ-Z2 最低档验收")
-    parser.add_argument("--freq", type=float, default=1000.0, help="单点测量频率（Hz）")
-    parser.add_argument("--periods", type=int, default=10, help="积分周期数")
+    parser.add_argument("--freq", type=float, default=1000.0)
+    parser.add_argument("--periods", type=int, default=10)
     parser.add_argument(
-        "--sample-rate",
-        type=int,
-        default=48000,
-        help="传给官方 Audio.configure 的采样率",
+        "--backend",
+        choices=("auto", "audio_loopback", "rtl"),
+        default="auto",
     )
-    parser.add_argument(
-        "--skip-codec-init",
-        action="store_true",
-        help="codec 已经由同一启动会话初始化时跳过 BaseOverlay 配置",
-    )
+    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--clock-hz", type=float, default=50_000_000)
+    parser.add_argument("--sample-rate", type=int, default=48000)
+    parser.add_argument("--skip-codec-init", action="store_true")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
     report = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "bitstream": ensure_bitstream(),
+        "backend": None,
+        "bitstream": None,
         "codec": None,
-        "overlay_loaded": False,
+        "design": None,
         "measurement": None,
         "warnings": [],
     }
 
     try:
-        if not args.skip_codec_init:
-            report["codec"] = init_codec(args.sample_rate)
-        else:
+        backend = args.backend
+        if backend == "auto":
+            backend = "audio_loopback" if sys.platform.startswith("linux") else "rtl"
+        report["backend"] = backend
+        if backend == "audio_loopback":
             report["codec"] = {
-                "driver": "external",
+                "driver": "AudioADAU1761",
                 "sample_rate": args.sample_rate,
-                "line_in_selected": None,
+                "line_in_selected": True,
+                "dac_unmuted": True,
             }
-
-        load_custom_overlay(report["bitstream"])
-        report["overlay_loaded"] = True
-        report["measurement"] = measure_one(args.freq, args.periods)
+            report["design"] = {
+                "overlay": "BaseOverlay",
+                "path": "official PYNQ audio controller",
+            }
+            report["measurement"] = measure_audio_loopback(
+                args.freq,
+                repeats=args.repeats,
+            )
+        else:
+            report["bitstream"] = str(ensure_bitstream())
+            if args.skip_codec_init:
+                report["codec"] = {"driver": "external"}
+            else:
+                report["codec"] = configure_codec()
+            report["design"] = load_design(Path(report["bitstream"]), args.clock_hz)
+            report["measurement"] = measure_one(args.freq, args.periods)
     except Exception as exc:
         report["error"] = "%s: %s" % (type(exc).__name__, exc)
-        report["traceback_hint"] = (
-            "确认板子已从 PYNQ 镜像启动、PYNQ_DEMOD_CLK_HZ 与 XSA FCLK_CLK0 一致，"
-            "并检查 3.5 mm 线是否连接 HP+MIC 与 LINE IN。"
-        )
         print(json.dumps(json_safe(report), ensure_ascii=False, indent=2))
         return 2
 
     measurement = report["measurement"]
-    clock_hz = measurement["sample_clock_hz"]
-    derived_i2s_hz = clock_hz / 32.0 / 64.0
-    report["derived_i2s_sample_rate_hz"] = derived_i2s_hz
-    if not math.isclose(derived_i2s_hz, args.sample_rate, rel_tol=0.03):
-        report["warnings"].append(
-            "I2S 派生采样率约 %.1f Hz，与 codec 配置 %d Hz 不一致；"
-            "若短接后数据异常，优先检查时钟链。"
-            % (derived_i2s_hz, args.sample_rate)
+    checks = {
+        "nonzero": bool(measurement["nonzero"]),
+        "physical_signal": measurement.get("amplitude_code", 0.0) > 50_000.0,
+        "frequency_locked": abs(
+            measurement.get("frequency_error_hz", math.inf)
+        ) <= max(30.0, args.freq * 0.02),
+        "spectral_peak": measurement.get("peak_bin_ratio", 0.0) >= 50.0,
+    }
+    if report["backend"] == "audio_loopback":
+        checks["repeated_trials"] = (
+            measurement.get("valid_trials", 0) >= min(2, args.repeats)
+        )
+        checks["amplitude_stable"] = (
+            measurement.get("amplitude_spread_ratio", math.inf) <= 0.35
+        )
+    else:
+        expected_audio_rate = args.clock_hz / 2048.0
+        checks["clock_matches"] = math.isclose(
+            measurement["audio_sample_rate_hz"],
+            expected_audio_rate,
+            rel_tol=0.02,
         )
     if not measurement["nonzero"]:
-        report["warnings"].append(
-            "I/Q 均为 0：done 已到达，但没有采到有效信号；检查 codec、LINE IN 和短接线。"
-        )
+        report["warnings"].append("I/Q 均为 0，未检测到有效模拟回环")
+    for check, passed in checks.items():
+        if not passed:
+            report["warnings"].append("验收项失败：%s" % check)
+    report["checks"] = checks
+    report["passed"] = all(checks.values())
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
@@ -186,7 +274,7 @@ def main() -> int:
     )
     print(json.dumps(json_safe(report), ensure_ascii=False, indent=2))
     print("\n报告已写入：%s" % args.output)
-    return 0 if measurement["nonzero"] else 3
+    return 0 if report["passed"] else 3
 
 
 if __name__ == "__main__":

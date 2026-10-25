@@ -63,7 +63,7 @@ module top (
         .acc_I(acc_I_full), .acc_Q(acc_Q_full)  
     );
 
-    reg [31:0] timer;
+    reg [31:0] sample_count;
     reg [1:0]  state;
     localparam IDLE = 2'd0;
     localparam MEASURE = 2'd1;
@@ -76,25 +76,27 @@ module top (
 
     assign out_done = (state == DONE) ? 1'b1 : 1'b0;
     assign wire_sweep_clear = (state == IDLE) ? 1'b1 : 1'b0;
-    assign wire_sweep_en = (state == MEASURE) ? 1'b1 : 1'b0;
+    assign wire_sweep_en = (state == MEASURE) && rx_data_valid;
 
     always @(posedge clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
             state <= IDLE;
-            timer <= 0;
+            sample_count <= 0;
         end else begin
             case (state)
                 IDLE: begin
                     if (ps_start) begin
                         state <= MEASURE;
-                        timer <= 0;
+                        sample_count <= 0;
                     end
                 end
                 MEASURE: begin
-                    if (timer >= ps_window_max) begin
-                        state <= DONE;
-                    end else begin
-                        timer <= timer + 1;
+                    if (rx_data_valid) begin
+                        if (sample_count + 1'b1 >= ps_window_max) begin
+                            state <= DONE;
+                        end else begin
+                            sample_count <= sample_count + 1'b1;
+                        end
                     end
                 end
                 DONE: begin
@@ -106,11 +108,18 @@ module top (
         end
     end
 
-    // ★ 新增：简单分频器产生约 12.5MHz 的 MCLK
-    reg [2:0] clk_div = 3'd0;  // 加上 = 3'd0
+    // ADU1761 PLL is configured for a 10 MHz MCLK reference.
+    // The delivered XSA uses FCLK_CLK0 = 50 MHz, so a 5-cycle pattern
+    // (3 high / 2 low) produces 10 MHz without requiring another clock.
+    reg [2:0] mclk_div = 3'd0;
     always @(posedge clk) begin
-        clk_div <= clk_div + 1;
+        if (!sys_rst_n)
+            mclk_div <= 3'd0;
+        else if (mclk_div == 3'd4)
+            mclk_div <= 3'd0;
+        else
+            mclk_div <= mclk_div + 1'b1;
     end
-    assign au_mclk = clk_div[2]; // 100MHz / 8 = 12.5MHz
+    assign au_mclk = (mclk_div < 3'd3);
 
 endmodule
