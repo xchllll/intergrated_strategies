@@ -18,3 +18,6 @@ bypass_drc.tcl
 diagnosis_system/.venv/
 __pycache__/
 *.pyc
+
+# Board acceptance output
+data/acceptance_latest.json

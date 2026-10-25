@@ -29,8 +29,8 @@ ps_ctrl.py - PS 侧硬件控制驱动（PYNQ-Z2 / Zynq-7000）【溢出防护版
     平均为 0，低频测量不失真；N 同时是 calibration 的归一化点数，由
     measure_once() 原样返回，调用方必须把它传给
     calibration.calc_mag_phase(acc_I, acc_Q, N)。
-    SAMPLE_CLK 是解调采样时钟：当前 top.v 中 demod 直接跑 100 MHz 系统
-    时钟；将来接入 I2S RX（编解码器采样，如 48 kHz）时，把 SAMPLE_CLK
+    SAMPLE_CLK 是解调采样时钟：当前交付的 XSA 中 FCLK_CLK0 为 50 MHz。
+    将来接入 I2S RX（编解码器采样，如 48 kHz）时，把 SAMPLE_CLK
     改为编解码器采样率即可，公式不变。
 
 【48 位累加器溢出防护】（v2 新增）
@@ -42,10 +42,10 @@ ps_ctrl.py - PS 侧硬件控制驱动（PYNQ-Z2 / Zynq-7000）【溢出防护版
     之内（低频时 N 大，自动减周期；N 与归一化口径随实际窗长联动，精度
     不受影响，返回的 window_n 始终是实际积分点数）。
     注意：当频率低到"连 1 个完整周期都超过 SAFE_MAX_N"（满量程输入时
-    约 f < 477 Hz）时，软件无法仅靠减周期完全消除溢出风险，会打印警告；
+    约 f < 239 Hz）时，软件无法仅靠减周期完全消除溢出风险，会打印警告；
     此时应通过前端衰减/输入缩放降低 ADC 码值，或从硬件侧扩位宽/降本振。
     （曾评估"分块积分、软件求和"方案：分块必须覆盖整数周期才能让 2f
-    分量平均为 0，而 f < 477 Hz 时单个完整周期已超安全上限，分块不成立，
+    分量平均为 0，而 f < 239 Hz 时单个完整周期已超安全上限，分块不成立，
     故不采用，仅保留自动减周期 + 告警。）
 
 时序要点（top.v 行为）：
@@ -55,6 +55,7 @@ ps_ctrl.py - PS 侧硬件控制驱动（PYNQ-Z2 / Zynq-7000）【溢出防护版
        都在比较 timer >= ps_window_max，中途改窗长会破坏本次积分。
 """
 
+import os
 import time
 
 try:
@@ -77,7 +78,9 @@ REG_GPIO_DATA = 0x00           # channel 1 数据寄存器
 REG_GPIO2_DATA = 0x08          # channel 2 数据寄存器
 
 # 系统参数
-SAMPLE_CLK = 100e6             # 解调采样时钟（top.v 系统时钟 100 MHz）
+SAMPLE_CLK = float(os.environ.get("PYNQ_DEMOD_CLK_HZ", "50000000"))
+if SAMPLE_CLK <= 0:
+    raise ValueError("PYNQ_DEMOD_CLK_HZ 必须为正数，当前为 %r" % SAMPLE_CLK)
 REG_RANGE = 0x1000             # AXI GPIO 地址段长度（4096 字节）
 
 # 测量参数
@@ -94,7 +97,7 @@ ADC_FULL_SCALE_16BIT = 32767                      # 输入信号最坏情况（�
 # 同相满量程单点相干积分贡献 ≈ A_ADC * A_LO / 2；留 20% 裕量，得到安全点数上限：
 SAFE_MAX_N = int(0.8 * ACC_FULL_SCALE / (ADC_FULL_SCALE_16BIT * LO_GAIN / 2.0))
 # 仅靠减小 periods 即可保证安全的频率下限（periods=1 时 N 仍 ≤ SAFE_MAX_N）：
-SAFE_MIN_FREQ_HZ = SAMPLE_CLK / SAFE_MAX_N        # ≈ 477 Hz
+SAFE_MIN_FREQ_HZ = SAMPLE_CLK / SAFE_MAX_N        # 50 MHz 时约 239 Hz
 
 _mmio_cache = {}
 
@@ -233,7 +236,8 @@ def read_IQ():
     return _to_signed_48(acc_i_raw), _to_signed_48(acc_q_raw)
 
 
-def measure_once(freq_hz, periods=DEFAULT_PERIODS, margin_s=1e-3):
+def measure_once(freq_hz, periods=DEFAULT_PERIODS, margin_s=1e-3,
+                 poll_interval_s=1e-3):
     """一步完成单频点测量：设频 -> 设窗 -> 启动 -> 等待 -> 回读 -> 停止。
 
     设窗时默认开启溢出防护（auto_safe，见 set_window）：低频点会自动
@@ -249,15 +253,22 @@ def measure_once(freq_hz, periods=DEFAULT_PERIODS, margin_s=1e-3):
     set_freq(freq_hz)
     window_n = set_window(freq_hz, periods)
 
-    # 等待时间 = 积分时长 + 裕量；DONE 态在 start 为高时保持，多等无害。
-    hold_s = max(window_n / SAMPLE_CLK + margin_s, MIN_HOLD_S)
+    # 超时时间 = 积分时长 + 裕量；以 DONE 寄存器为准，不再盲等固定时长。
+    timeout_s = max(window_n / SAMPLE_CLK + margin_s, MIN_HOLD_S)
 
     gpio = _get_mmio(AXI_GPIO_0_BASE)
     gpio.write(REG_GPIO2_DATA, 0x1)          # 拉高 start
     try:
-        time.sleep(hold_s)
-        acc_i, acc_q = read_IQ()             # start 仍为高，结果未被清零
-        return acc_i, acc_q, window_n
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if read_done():
+                acc_i, acc_q = read_IQ()
+                return acc_i, acc_q, window_n
+            time.sleep(poll_interval_s)
+        raise RuntimeError(
+            "等待 out_done 超时（%.3f s，N=%d，f=%.1f Hz，clk=%.0f Hz）；"
+            "请检查 bitstream、FCLK_CLK0、AXI GPIO 地址和 ps_start 接线。"
+            % (timeout_s, window_n, freq_hz, SAMPLE_CLK))
     finally:
         gpio.write(REG_GPIO2_DATA, 0x0)      # 拉低 start -> 回 IDLE
 

@@ -2,85 +2,204 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>便携式电子电路智能诊断系统</title>
     <script src="/static/plotly.min.js"></script>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background: #eef2f5; }
-        .header { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); margin-bottom: 20px; }
-        h1 { margin: 0; color: #333; font-size: 24px; }
-        
-        .control-panel { display: flex; align-items: center; gap: 20px; }
-        button { padding: 10px 25px; font-size: 16px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 6px; transition: 0.3s; }
-        button:hover { background: #0056b3; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
-        
-        /* 缓冲器开关样式 */
-        .switch-container { display: flex; align-items: center; gap: 10px; font-size: 16px; color: #555; }
-        .switch { position: relative; display: inline-block; width: 50px; height: 26px; }
-        .switch input { opacity: 0; width: 0; height: 0; }
-        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 26px; }
-        .slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
-        input:checked + .slider { background-color: #28a745; }
-        input:checked + .slider:before { transform: translateX(24px); }
-
-        .main-content { display: flex; gap: 20px; }
-        .chart-section { flex: 3; display: flex; flex-direction: column; gap: 20px; }
-        .chart-box { background: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
-        h2 { margin-top: 0; font-size: 18px; color: #333; }
-        
-        /* AI 结果面板 */
-        .ai-section { flex: 1; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); display: flex; flex-direction: column; }
-        .ai-result { margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 5px solid #17a2b8; }
-        .ai-label { color: #6c757d; font-size: 14px; margin-bottom: 5px; }
-        .ai-value { font-size: 24px; font-weight: bold; color: #007bff; margin-bottom: 15px; }
-        .conf-value { font-size: 20px; font-weight: bold; color: #28a745; }
+        :root {
+            --ink: #183047;
+            --muted: #65768a;
+            --line: #dfe7ef;
+            --panel: #ffffff;
+            --blue: #1769e0;
+            --orange: #d95c14;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+            color: var(--ink);
+            background: linear-gradient(145deg, #eef6ff 0%, #f6f8fb 52%, #fff6ee 100%);
+        }
+        .page {
+            width: min(1480px, calc(100% - 32px));
+            margin: 0 auto;
+            padding: 26px 0 36px;
+        }
+        .header, .panel {
+            background: var(--panel);
+            border: 1px solid rgba(255, 255, 255, 0.9);
+            border-radius: 18px;
+            box-shadow: 0 10px 32px rgba(33, 63, 94, 0.08);
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 24px;
+            padding: 22px 26px;
+        }
+        h1 { margin: 0 0 6px; font-size: 25px; }
+        .subtitle, .muted { margin: 0; color: var(--muted); font-size: 13px; }
+        .status-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            min-height: 29px;
+            padding: 4px 11px;
+            border-radius: 999px;
+            color: #425466;
+            background: #edf2f7;
+            font-size: 12px;
+            font-weight: 650;
+        }
+        .badge-real { color: #116746; background: #dff7eb; }
+        .badge-demo { color: #245b9b; background: #e2efff; }
+        .badge-warning { color: #95580b; background: #fff0d6; }
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            margin-top: 18px;
+            padding: 17px 22px;
+        }
+        .switch-wrap { display: flex; align-items: center; gap: 11px; font-size: 14px; }
+        .switch { position: relative; width: 48px; height: 26px; }
+        .switch input { width: 0; height: 0; opacity: 0; }
+        .slider {
+            position: absolute;
+            inset: 0;
+            cursor: pointer;
+            border-radius: 999px;
+            background: #c5d0dc;
+            transition: 0.2s;
+        }
+        .slider::before {
+            content: "";
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            left: 3px;
+            top: 3px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 2px 6px rgba(20, 42, 65, 0.25);
+            transition: 0.2s;
+        }
+        .switch input:checked + .slider { background: var(--blue); }
+        .switch input:checked + .slider::before { transform: translateX(22px); }
+        button {
+            min-width: 175px;
+            padding: 11px 22px;
+            border: 0;
+            border-radius: 10px;
+            color: #fff;
+            background: linear-gradient(135deg, #1769e0, #0e52b8);
+            box-shadow: 0 8px 18px rgba(23, 105, 224, 0.24);
+            cursor: pointer;
+            font-size: 15px;
+            font-weight: 700;
+        }
+        button:hover { filter: brightness(1.06); }
+        button:disabled { cursor: wait; filter: grayscale(0.45); opacity: 0.65; }
+        .notice {
+            margin: 14px 0 0;
+            padding: 11px 14px;
+            border-radius: 10px;
+            color: #33546e;
+            background: #eaf4ff;
+            font-size: 13px;
+        }
+        .notice-warning { color: #7f4a08; background: #fff1d9; }
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 320px;
+            gap: 18px;
+            margin-top: 18px;
+        }
+        .charts, .side { display: grid; gap: 18px; align-content: start; }
+        .chart-panel, .side-panel, .info-panel { padding: 18px 20px; }
+        h2 { margin: 0 0 12px; font-size: 16px; }
+        .plot { width: 100%; min-height: 310px; }
+        .info-panel p { margin: 7px 0; }
+        .label { color: var(--muted); font-size: 12px; }
+        .ai-name { margin: 10px 0 7px; color: var(--blue); font-size: 25px; font-weight: 750; }
+        .ai-conf { margin: 0; color: #18865d; font-size: 21px; font-weight: 750; }
+        .ai-note { min-height: 36px; }
+        @media (max-width: 960px) {
+            .layout { grid-template-columns: 1fr; }
+            .header { align-items: flex-start; flex-direction: column; }
+            .status-row { justify-content: flex-start; }
+        }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>便携式电子电路智能诊断系统</h1>
-        <div class="control-panel">
-            <div class="switch-container">
-                <span>启用缓冲器(电压跟随)</span>
-                <label class="switch">
-                    <input type="checkbox" id="buffer-toggle">
-                    <span class="slider"></span>
-                </label>
-            </div>
-            <button id="start-btn" onclick="startSweep()">开始扫频测量</button>
+<main class="page">
+    <header class="header">
+        <div>
+            <h1>便携式电子电路智能诊断系统</h1>
+            <p class="subtitle">DDS 扫频 / I-Q 相干解调 / Bode 曲线 / 电路拓扑识别</p>
         </div>
-    </div>
-    
-    <div class="main-content">
-        <!-- 双图区 -->
-        <div class="chart-section">
-            <div class="chart-box">
-                <h2>幅频特性 (Bode - Magnitude)</h2>
-                <div id="mag-plot"></div>
-            </div>
-            <div class="chart-box">
-                <h2>相频特性 (Bode - Phase)</h2>
-                <div id="phase-plot"></div>
-            </div>
+        <div class="status-row">
+            <span id="source-badge" class="badge">读取数据源...</span>
+            <span id="calibration-badge" class="badge">读取校准状态...</span>
         </div>
-        
-        <!-- AI 识别结果面板 -->
-        <div class="ai-section">
-            <h2>AI 识别结果</h2>
-            <p style="color:#666; font-size:14px;">基于实测扫频曲线特征进行拓扑识别</p>
-            <div class="ai-result">
-                <div class="ai-label">预测电路类型</div>
-                <div class="ai-value" id="ai-topo">待接入模型</div>
-                
-                <div class="ai-label">模型置信度</div>
-                <div class="conf-value" id="ai-conf">--%</div>
-            </div>
-            <div style="margin-top:auto; font-size:12px; color:#999;">
-                *直连与缓冲校准已在PS端应用
-            </div>
-        </div>
-    </div>
+    </header>
 
-    <script src="/static/dashboard.js"></script>
+    <section class="panel controls">
+        <div class="switch-wrap">
+            <span>启用缓冲器（电压跟随）</span>
+            <label class="switch">
+                <input id="buffer-toggle" type="checkbox">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <button id="start-btn" type="button" onclick="startSweep()">开始扫频测量</button>
+    </section>
+
+    <div id="notice" class="notice">页面已就绪。Windows 环境展示仓库内演示 CSV，PYNQ 环境读取硬件。</div>
+
+    <section class="layout">
+        <div class="charts">
+            <article class="panel chart-panel">
+                <h2>幅频特性</h2>
+                <div id="magnitude-plot" class="plot"></div>
+            </article>
+            <article class="panel chart-panel">
+                <h2>相频特性</h2>
+                <div id="phase-plot" class="plot"></div>
+            </article>
+        </div>
+
+        <aside class="side">
+            <article class="panel side-panel">
+                <h2>AI 识别结果</h2>
+                <p class="label">电路拓扑</p>
+                <p id="ai-topo" class="ai-name">等待测量</p>
+                <p class="label">模型置信度</p>
+                <p id="ai-conf" class="ai-conf">--%</p>
+                <p id="ai-note" class="muted ai-note">尚未运行模型</p>
+            </article>
+
+            <article class="panel info-panel">
+                <h2>本次数据状态</h2>
+                <p class="label">采集来源</p>
+                <p id="source-detail" class="muted">读取中...</p>
+                <p class="label">校准状态</p>
+                <p id="calibration-detail" class="muted">读取中...</p>
+                <p class="muted">演示数据会明确标注；未完成四态校准时不宣称“已校准”。</p>
+            </article>
+        </aside>
+    </section>
+</main>
+<script src="/static/dashboard.js"></script>
 </body>
-</html>>
+</html>
