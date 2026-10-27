@@ -249,13 +249,21 @@ def read_IQ():
     return _to_signed_48(acc_i_raw), _to_signed_48(acc_q_raw)
 
 
-def measure_once(freq_hz, periods=DEFAULT_PERIODS, margin_s=1e-3,
-                 poll_interval_s=1e-3):
+def measure_once(freq_hz, periods=DEFAULT_PERIODS, margin_s=0.05,
+                 poll_interval_s=0.002):
     """一步完成单频点测量：设频 -> 设窗 -> 启动 -> 等待 -> 回读 -> 停止。
 
     设窗时默认开启溢出防护（auto_safe，见 set_window）：低频点会自动
     减小 periods 到 48 位累加器安全范围内，window_n 返回实际积分点数，
     归一化口径不受影响。
+
+    参数:
+        margin_s:        超时裕量（秒）。默认 50 ms。Python 侧 MMIO 轮询
+                         本身有开销，1 ms 裕量时 N=488（积分约 10 ms）的
+                         timeout 只有 11 ms，会被轮询开销吃光而误报超时。
+        poll_interval_s: out_done 轮询间隔（秒）。默认 2 ms，在 1000 Hz /
+                         N=488 下既能及时看到 DONE，又比 1 ms 轮询减少
+                         约一半的 CPU 唤醒/寄存器读取开销。
 
     返回: (acc_I, acc_Q, window_n)
         acc_I / acc_Q: 48 位有符号累加值
@@ -273,15 +281,19 @@ def measure_once(freq_hz, periods=DEFAULT_PERIODS, margin_s=1e-3,
     gpio.write(REG_GPIO2_DATA, 0x1)          # 拉高 start
     try:
         deadline = time.monotonic() + timeout_s
+        done_seen = False
         while time.monotonic() < deadline:
-            if read_done():
+            done_seen = read_done()
+            if done_seen:
                 acc_i, acc_q = read_IQ()
                 return acc_i, acc_q, window_n
             time.sleep(poll_interval_s)
         raise RuntimeError(
-            "等待 out_done 超时（%.3f s，N=%d，f=%.1f Hz，fs=%.1f Hz）；"
+            "等待 out_done 超时（timeout=%.3f s，N=%d，f=%.1f Hz，"
+            "fs=%.1f Hz，out_done=%d）；"
             "请检查 bitstream、FCLK_CLK0、AXI GPIO 地址和 ps_start 接线。"
-            % (timeout_s, window_n, freq_hz, AUDIO_SAMPLE_RATE_HZ))
+            % (timeout_s, window_n, freq_hz, AUDIO_SAMPLE_RATE_HZ,
+               int(done_seen)))
     finally:
         gpio.write(REG_GPIO2_DATA, 0x0)      # 拉低 start -> 回 IDLE
 

@@ -15,3 +15,6 @@ set_property IOSTANDARD LVCMOS33 [get_ports i2s_sdata_in_0]
 
 set_property PACKAGE_PIN U5 [get_ports au_mclk_0]
 set_property IOSTANDARD LVCMOS33 [get_ports au_mclk_0]
+
+set_property -dict {PACKAGE_PIN U9 IOSTANDARD LVCMOS33 PULLUP true} [get_ports au_scl]
+set_property -dict {PACKAGE_PIN T9 IOSTANDARD LVCMOS33 PULLUP true} [get_ports au_sda]
