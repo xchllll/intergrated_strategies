@@ -30,6 +30,8 @@ gen_dataset.py - 自动化数据集生成（20Hz ~ 20kHz 扫频，240 点）【�
       直接决定积分窗长 N = round(periods * SAMPLE_CLK / f) 与测量耗时；
       低频时 N 较大、单点耗时较长（20Hz、10 周期约 0.5 s）。
     * 原 --duration_ms 参数已废弃（积分时长由 periods 决定）。
+    * 上板实测时若某频点因信号过弱/底噪导致 out_done 超时等异常，该点记为
+      mag=-99.0 dB、phase=0.0 占位并继续扫下一个点，不会中断整个脚本。
     默认生成的 dataset_rc_lpf.csv 为 dry-run 示例数据，上板实测后请用
     --real 重新生成覆盖。
 """
@@ -52,6 +54,10 @@ import calibration as cal  # noqa: E402
 DEFAULT_LABEL = "RC_LPF"
 DEFAULT_OUTPUT = os.path.join(_HERE, "dataset_rc_lpf.csv")
 DEFAULT_PERIODS = 10
+
+# 弱信号/失败频点的占位记录（dB 与度）
+PLACEHOLDER_MAG_DB = -99.0
+PLACEHOLDER_PHASE_DEG = 0.0
 
 
 def log_spaced_freqs(fstart, fstop, points):
@@ -76,21 +82,27 @@ def measure_point(freq_hz, periods):
     积分点数 N 由 ps_ctrl.measure_once() 返回并原样传给
     calibration.calc_mag_phase()，保证归一化口径与硬件积分窗一致。
 
-    【单点异常护盾】真实扫频时，信号微弱/接触不良可能让某个频点的
-    ps_ctrl.measure_once() 等不到 out_done 而抛 RuntimeError（超时），
-    也可能在校准链路抛其他异常。这里整体 try-except，单点失败只记录
-    占位数据 (-99.0 dB, 0.0 deg) 并继续，避免 240 点扫频被一个坏点中断。
-    占位值在 CSV 中可被下游按 -99.0 过滤。
+    异常兜底：真实电路在某频点信号极弱/底噪高导致 out_done 超时
+    （ps_ctrl.measure_once 抛 RuntimeError）等异常时，捕获后记录
+    mag=-99.0 dB、phase=0.0 占位并返回，让外层扫频循环继续下一频点，
+    不会让整个脚本崩溃。幅值非正（信号过弱）同样记为占位，避免 NaN
+    写入 CSV 污染下游训练数据。
     """
     try:
         acc_i, acc_q, window_n = ps_ctrl.measure_once(freq_hz, periods=periods)
         mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
         mag_cal, phase_cal = cal.apply_calibration(mag, phase, freq_hz)
-        mag_db = 20.0 * math.log10(mag_cal) if mag_cal > 0.0 else float("nan")
-        return mag_db, phase_cal
-    except Exception:
-        print(f"[ERROR] 频率 {freq_hz:.2f} Hz 测量超时/失败")
-        return -99.0, 0.0
+    except Exception as exc:
+        print("  [WARN] f=%.2f Hz 测量异常（%s: %s），该点记为 %.1f dB / %.1f deg"
+              % (freq_hz, type(exc).__name__, exc,
+                 PLACEHOLDER_MAG_DB, PLACEHOLDER_PHASE_DEG))
+        return PLACEHOLDER_MAG_DB, PLACEHOLDER_PHASE_DEG
+    if mag_cal > 0.0:
+        return 20.0 * math.log10(mag_cal), phase_cal
+    print("  [WARN] f=%.2f Hz 幅值非正（mag_cal=%.6g），信号过弱，"
+          "该点记为 %.1f dB / %.1f deg"
+          % (freq_hz, mag_cal, PLACEHOLDER_MAG_DB, PLACEHOLDER_PHASE_DEG))
+    return PLACEHOLDER_MAG_DB, PLACEHOLDER_PHASE_DEG
 
 
 def main():

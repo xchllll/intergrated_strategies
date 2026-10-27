@@ -3,9 +3,13 @@ document.addEventListener('DOMContentLoaded', () => {
     loadStatus();
 });
 
+// 1. 修改 loadStatus，支持传参
 async function loadStatus() {
+    const isBufferOn = document.getElementById('buffer-toggle').checked;
+    const calPath = isBufferOn ? 'buffer' : 'direct';
+    
     try {
-        const response = await fetch('/api/status');
+        const response = await fetch(`/api/status?cal_path=${calPath}`);
         const result = await response.json();
         if (result.status === 'success') {
             applyStatus(result.source, result.calibration);
@@ -14,6 +18,17 @@ async function loadStatus() {
         setNotice('无法读取后端状态：' + error.message, true);
     }
 }
+
+// 2. 在 DOMContentLoaded 里面，给开关加个监听事件 (加到 document.addEventListener 里面)
+document.addEventListener('DOMContentLoaded', () => {
+    drawBode([], [], [], 'demo_csv');
+    loadStatus();
+    
+    // 【P2 修复】每次拨动开关，立刻重新拉取校准状态
+    document.getElementById('buffer-toggle').addEventListener('change', () => {
+        loadStatus();
+    });
+});
 
 function applyStatus(source, calibration) {
     const sourceBadge = document.getElementById('source-badge');
