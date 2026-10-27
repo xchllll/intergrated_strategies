@@ -26,5 +26,14 @@
 | 21 | PYNQ 运行 Python 报错：`AxiGPIO.Channel.write() missing 1 required positional argument: 'mask'` | AI 提示这是 PYNQ 新版 API 变动，写寄存器需要指定位掩码（Mask）。 | **验证**：在写入函数中加入掩码参数：`gpio.channel1.write(value, 0xFFFFFFFF)` 后成功写入硬件。 |
 | 22 | Python 拼接 48 位数据后，算出来的 I/Q 值是几百万亿的超级正数，不符合理论负数结果。 | AI 指出 Python 默认按无符号整数处理，高 16 位如果是 1，需要手动处理 48 位有符号补码。 | **验证**：加入判断 `if acc_I >= (1 << 47): acc_I -= (1 << 48)`，成功还原了正确的负数值，与理论推导完美吻合。 |
 | 23 | 在 block design 中，i2s_sdata_in 等引脚总是提示 tied-off to all 0's。 | AI 建议在 BD 中手动 Make External 并绑定引脚。 | **验证**：刷新模块后，将新增端口 Make External，并在 `top.xdc` 中补充了对应的真实管脚约束（如 G18、U5），彻底消除了悬空警告。 |
+# 大模型协作记录 (Large Model Collaboration Log) - P0 阶段
+
+| 轮次 | 用户提示词 (Prompt) | 模型回答摘要 | 自我纠错 / 验证过程 |
+| :--- | :--- | :--- | :--- |
+| 24 | 驱动写完后发现 `read_IQ()` 读不到 `out_acc_I/Q`，是代码问题还是硬件问题？ | AI 复查 hwh 端口连接表，发现 `top.v` 的 `out_acc_I[47:0]`、`out_acc_Q[47:0]`、`out_done` 在 Block Design 中**未接入任何 AXI GPIO（悬空）**，属硬件接线缺口而非代码错误；同时指出 `ps_start` 拉低后状态机回 IDLE 会把累加器清零，取数必须在 start 仍为高时进行。 | **验证**：确认根因后给出方案——在 Block Design 补接读取 GPIO，并新增 `measure_once()` 便捷接口规避清零时序，脚本保留可配置常量待接入后填写。 |
+| 25 | 写 `calibration.py` 把 48 位 `acc_I/Q` 还原成 V 和度时，定点截断系数按哪个口径？ | AI 以 `python_model/demod_sim.py` 为唯一口径：`norm_factor = N × 10000 × 32767`；注意到该文件积分点数 N 已从 1000 改为 100，归一化因子随之变化，故把 N 等系数集中定义为常量并标注“与模型单点同步”。 | **验证**：先在本地用 demod_sim.py 的验收数据反推定点累加值，重算 `I_float/Q_float` 与幅值相位公式确认一致；校准表留空，由 `four_state_calibrate()` 待上板后用 4 个已知参考态自动填充。 |
+| 26 | 加载自定义 XSA 后，`i2c-1` 扫描 0x3B 报 `Errno 6 (No such device or address)`。之前用官方 base.bit 是能扫描到的。 | AI 对比了原理图与交接文档，指出文档中写的 `SCL=P16, SDA=P15` 是 Arduino 扩展引脚的 I2C，而非板载 ADAU1761 的 I2C。ADAU1761 的实际引脚为 `SCL=U9, SDA=T9`。 | **验证**：修改 XDC 重新生成 Bitstream，加载后 `os.write` 成功不再报 Errno 6，成功通过 I2C 配置了 codec 寄存器。 |
+| 27 | 硬件模块配置完成拉高 start 后，调用 `ps_ctrl.measure_once()` 始终报 `out_done` 超时。 | AI 计算了积分时间（N=488约10ms），指出 `measure_once` 默认的 `margin_s=1e-3`（1ms）太短，会被 Python 的 `time.sleep` 和 MMIO 读取开销吃掉，建议将 margin 改为 0.05 (50ms)。 | **验证**：T1 修改后单元测试通过。但在板子上因旧版 `acceptance.py` 会加载 base.bit 导致硬件被覆盖，仍报超时。后通过手搓 MMIO 寄存器测出了真实的 `acc_I=-69786, acc_Q=22854`，证实硬件逻辑无误。 |
+| 28 | 跑 `acceptance.py --backend rtl`，硬件已读到非零 `acc_I` 和 `acc_Q`，但判定 `passed: false`，报 `physical_signal` 和 `frequency_locked` 失败。 | AI 审查了 checks 逻辑，指出 `physical_signal` 是依赖 `amplitude_code`（FFT频谱分析）的字段，在 RTL 后端的字典里根本不存在。建议分离 RTL 和 audio_loopback 的判定逻辑。 | **验证**：确认为测试脚本逻辑 Bug。交由 T1 修改 `acceptance.py`，区分双后端的判定标准。 |
 ## 阶段总结
 在初期协作中，大模型在代码语法（如 DDS 的查表与相位累加器结构）和工具链排错（Vivado 波形显示机制、Git 凭据配置）上提供了有效辅助。但团队成员对工程边界（如 FPAG 不能写浮点）和真实环境（Windows 凭据冲突）的把关，保证了项目的正确推进。
