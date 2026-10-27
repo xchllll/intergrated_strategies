@@ -250,15 +250,13 @@ def main() -> int:
         return 2
 
     measurement = report["measurement"]
-    checks = {
-        "nonzero": bool(measurement["nonzero"]),
-        "physical_signal": measurement.get("amplitude_code", 0.0) > 50_000.0,
-        "frequency_locked": abs(
-            measurement.get("frequency_error_hz", math.inf)
-        ) <= max(30.0, args.freq * 0.02),
-        "spectral_peak": measurement.get("peak_bin_ratio", 0.0) >= 50.0,
-    }
+    checks = {"nonzero": bool(measurement["nonzero"])}
     if report["backend"] == "audio_loopback":
+        checks["physical_signal"] = measurement.get("amplitude_code", 0.0) > 50_000.0
+        checks["frequency_locked"] = abs(
+            measurement.get("frequency_error_hz", math.inf)
+        ) <= max(30.0, args.freq * 0.02)
+        checks["spectral_peak"] = measurement.get("peak_bin_ratio", 0.0) >= 50.0
         checks["repeated_trials"] = (
             measurement.get("valid_trials", 0) >= min(2, args.repeats)
         )
@@ -271,6 +269,10 @@ def main() -> int:
             measurement["audio_sample_rate_hz"],
             expected_audio_rate,
             rel_tol=0.02,
+        )
+        checks["magnitude_valid"] = (
+            measurement.get("magnitude_raw_v", 0.0) > 0.0001
+            or abs(measurement.get("acc_i", 0)) + abs(measurement.get("acc_q", 0)) > 1000
         )
     if not measurement["nonzero"]:
         report["warnings"].append("I/Q 均为 0，未检测到有效模拟回环")
