@@ -1,23 +1,28 @@
 # Vivado 工程缓存文件 (Project Cache)
-project/
+# 不要整目录忽略 project/：.xpr、.tcl、.xci、.bd 与 srcs 源码需要纳入版本管理
+project/**/dds_sim.gen/
+project/**/dds_sim.cache/
+project/**/dds_sim.runs/
+project/**/dds_sim.sim/
+project/**/dds_sim.ip_user_files/
+project/**/dds_sim.hw/
 *.jou
 *.log
 *.str
 *.Xil/
+*.Xil
 
-# Python 运行缓存
+# Python
+.venv/
 __pycache__/
 *.pyc
+diagnosis_system/.venv/
+.pytest_cache/
 
 # 系统文件
 .DS_Store
 Thumbs.db
 bypass_drc.tcl
-
-#venv忽略
-diagnosis_system/.venv/
-__pycache__/
-*.pyc
 
 # Board acceptance output
 data/acceptance_latest.json
