@@ -26,38 +26,47 @@ def extract_features(freqs, mag_db, phase_deg):
     输出: 
         包含 13 个特征的字典
     """
-    freqs = np.array(freqs)
-    mag_db = np.array(mag_db)
-    phase_deg = np.array(phase_deg)
+    freqs = np.asarray(freqs)
+    mag_db = np.asarray(mag_db)
+    phase_deg = np.asarray(phase_deg)
     
-    # 1. 低频与高频增益 (取最前和最后 5 个点的平均)
-    gain_low = np.mean(mag_db[:5])
-    gain_high = np.mean(mag_db[-5:])
+    n_pts = len(mag_db)
+    if n_pts == 0:
+        return {k: 0.0 for k in FEATURE_ORDER}
+
+    # 【修复3】动态边缘取点：12个点时取1个，240个点时取5个，防止小数据被吃光
+    edge_idx = max(1, min(5, n_pts // 10))
+    
+    # 1. 低频与高频增益
+    gain_low = np.mean(mag_db[:edge_idx])
+    gain_high = np.mean(mag_db[-edge_idx:])
     
     # 2. 增益斜率 (线性拟合，换算为 dB/dec)
     log_freqs = np.log10(freqs)
     slope, _ = np.polyfit(log_freqs, mag_db, 1)
     slope_db_dec = slope
     
-    # 3. 截止频率 (-3dB点，相对低频增益)
-    target_low_db = gain_low - 3.0
-    # 寻找第一个低于 -3dB 点的索引
-    idx_f3db = np.where(mag_db < target_low_db)[0]
-    if len(idx_f3db) > 0:
-        f3db_hz = freqs[idx_f3db[0]]
-    else:
-        f3db_hz = freqs[-1] # 没找到的话就取最高频
-        
-    # 4. 峰值特征
+    # 4. 峰值特征 (提前算，给 f3db 用)
     peak_idx = np.argmax(mag_db)
     peak_gain_db = mag_db[peak_idx]
     peak_freq_hz = freqs[peak_idx]
-    
-    # 峰值突出度 (峰值增益减去两端增益的较大值)
     peak_prominence = peak_gain_db - max(gain_low, gain_high)
     
+    # 【修复1】截止频率 (-3dB点) 通用算法
+    # 先确定通带的参考增益（取两端或峰值中的最大值）
+    ref_gain = max(gain_low, gain_high, peak_gain_db)
+    target_gain = ref_gain - 3.0
+    
+    if gain_low > gain_high:
+        # 类似低通：寻找从高往下穿越 -3dB 的点
+        idx_f3db = np.where(mag_db <= target_gain)[0]
+        f3db_hz = freqs[idx_f3db[0]] if len(idx_f3db) > 0 else freqs[-1]
+    else:
+        # 类似高通或带通：寻找从低往上穿过 -3dB 的点
+        idx_f3db = np.where(mag_db >= target_gain)[0]
+        f3db_hz = freqs[idx_f3db[0]] if len(idx_f3db) > 0 else freqs[0]
+        
     # 5. Q值粗略估计 (中心频率 / 带宽)
-    # 找比峰值低 3dB 的两个边界
     target_peak_db = peak_gain_db - 3.0
     valid_idx = np.where(mag_db >= target_peak_db)[0]
     if len(valid_idx) > 1:
@@ -68,15 +77,19 @@ def extract_features(freqs, mag_db, phase_deg):
     else:
         q_factor = 0.0
 
-    # 6. 相位特征
-    phase_low = np.mean(phase_deg[:5])
-    phase_high = np.mean(phase_deg[-5:])
-    phase_mid = phase_deg[len(phase_deg)//2]
-    phase_span = np.max(phase_deg) - np.min(phase_deg)
+    # 【修复2】相位特征 (解卷绕/Unwrap，解决 -180 到 180 的跳变)
+    phase_unwrapped = np.degrees(np.unwrap(np.radians(phase_deg)))
+    
+    phase_low = np.mean(phase_unwrapped[:edge_idx])
+    phase_high = np.mean(phase_unwrapped[-edge_idx:])
+    phase_mid = phase_unwrapped[n_pts // 2]
+    phase_span = np.max(phase_unwrapped) - np.min(phase_unwrapped)
     
     # 7. 曲线平滑度 (二阶差分)
-    # 平滑的曲线二阶差分很小，有毛刺或谐振峰的地方二阶差分大
-    smoothness = np.sqrt(np.mean(np.diff(mag_db, n=2)**2))
+    if n_pts > 2:
+        smoothness = np.sqrt(np.mean(np.diff(mag_db, n=2)**2))
+    else:
+        smoothness = 0.0
 
     return {
         "gain_low": float(gain_low),

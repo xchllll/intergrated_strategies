@@ -10,6 +10,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT_DIR))  # A4: 修复路径
 sys.path.insert(0, str(ROOT_DIR / "board"))
 sys.path.insert(0, str(ROOT_DIR / "python_model"))
 sys.path.insert(0, str(ROOT_DIR / "data"))
@@ -22,8 +23,8 @@ AUDIO_SWEEP_POINTS = 12
 AUDIO_LOOPBACK_DRIVER = None
 
 
-def _runtime_source() -> dict:
-    """Return the active acquisition path without pretending demo data is real."""
+def _runtime_source(mode: str = "auto") -> dict:
+    """A2: Return the active acquisition path without pretending demo data is real."""
     if platform.system() == "Windows":
         return {
             "mode": "demo_csv",
@@ -31,11 +32,20 @@ def _runtime_source() -> dict:
             "label": "Windows 演示数据",
             "detail": str(DEMO_CSV.relative_to(ROOT_DIR)),
         }
+    
+    if mode == "audio":
+        return {
+            "mode": "pynq_audio_loopback",
+            "is_real": True,
+            "label": "PYNQ 官方音频闭环实测",
+            "detail": "DDS 音频激励 -> HP+MIC -> LINE IN -> 48 kHz 采样",
+        }
+    
     return {
-        "mode": "pynq_audio_loopback",
+        "mode": "pynq_rtl",
         "is_real": True,
-        "label": "PYNQ 官方音频闭环实测",
-        "detail": "DDS 音频激励 -> HP+MIC -> LINE IN -> 48 kHz 采样",
+        "label": "自研 PL 解调实测",
+        "detail": "DDS -> I2S -> ADAU1761 -> DUT -> I2S RX -> PL demod",
     }
 
 
@@ -44,10 +54,7 @@ def _calibration_state(calibration_module) -> dict:
         calibration_module.ensure_calibration_loaded()
         return calibration_module.calibration_status()
     except Exception as exc:
-        return {
-            "calibrated": False,
-            "message": "校准状态读取失败：%s" % exc,
-        }
+        return {"calibrated": False, "message": "校准状态读取失败：%s" % exc}
 
 
 def _load_demo_csv() -> dict:
@@ -73,6 +80,14 @@ def _log_spaced_freqs(start_hz: float, stop_hz: float, count: int) -> list[float
     return [start_hz * ratio**index for index in range(count)]
 
 
+def _ensure_rtl_design():
+    """A1: 扫频前先配 codec、再烧自定义 bitstream"""
+    import acceptance
+    # 顺序绝对不能反：configure_codec 会加载 base.bit，把自定义设计冲掉
+    acceptance.configure_codec()
+    acceptance.load_design(acceptance.ensure_bitstream(), 1e8)
+
+
 def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     import calibration as cal
     import ps_ctrl
@@ -85,20 +100,14 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     warnings = []
     start_hz = max(20.0, ps_ctrl.SAFE_MIN_FREQ_HZ)
     if start_hz > 20.0:
-        warnings.append(
-            "为避免 48 位累加器在低频溢满量程，板端扫频从 %.1f Hz 开始。"
-            % start_hz
-        )
+        warnings.append("为避免 48 位累加器在低频溢满量程，板端扫频从 %.1f Hz 开始。" % start_hz)
+        
     for freq in _log_spaced_freqs(start_hz, 20000.0, SWEEP_POINTS):
         acc_i, acc_q, window_n = ps_ctrl.measure_once(freq, periods=10)
         mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
-        mag_cal, phase_cal = cal.apply_calibration(
-            mag, phase, freq, path=cal_path
-        )
+        mag_cal, phase_cal = cal.apply_calibration(mag, phase, freq, path=cal_path)
         data["freqs"].append(freq)
-        data["mag_db"].append(
-            20.0 * math.log10(mag_cal) if mag_cal > 0 else -99.0
-        )
+        data["mag_db"].append(20.0 * math.log10(mag_cal) if mag_cal > 0 else -99.0)
         data["phase_deg"].append(phase_cal)
 
     if not data["freqs"]:
@@ -124,61 +133,45 @@ def _get_audio_driver():
 
 
 def _run_audio_loopback_sweep() -> tuple[dict, dict, list[str]]:
-    """Measure real 1k-class loopback points through the official PYNQ codec."""
     import calibration as cal
-
     cal.ensure_calibration_loaded()
     calibration = cal.calibration_status()
     warnings = []
     if not calibration.get("calibrated"):
-        warnings.append(
-            "校准表为空；曲线为官方音频闭环的未校准原始测量。"
-        )
+        warnings.append("校准表为空；曲线为官方音频闭环的未校准原始测量。")
 
     data = {"freqs": [], "mag_db": [], "phase_deg": []}
     driver = _get_audio_driver()
     for freq in _log_frequencies(100.0, 10000.0, AUDIO_SWEEP_POINTS):
         measurement = driver.capture(freq)
-        if (
-            measurement["peak_bin_ratio"] < 50.0
-            or abs(measurement["frequency_error_hz"]) > max(30.0, freq * 0.02)
-        ):
+        if (measurement["peak_bin_ratio"] < 50.0 or abs(measurement["frequency_error_hz"]) > max(30.0, freq * 0.02)):
             warnings.append("跳过无效频点 %.1f Hz" % freq)
             continue
         magnitude = measurement["amplitude_full_scale"]
         phase = measurement["phase_deg"]
-        magnitude, phase = cal.apply_calibration(
-            magnitude,
-            phase,
-            freq,
-            path=cal.CAL_PATH_DIRECT,
-        )
+        magnitude, phase = cal.apply_calibration(magnitude, phase, freq, path=cal.CAL_PATH_DIRECT)
         data["freqs"].append(float(freq))
-        data["mag_db"].append(
-            20.0 * math.log10(magnitude) if magnitude > 0.0 else -99.0
-        )
+        data["mag_db"].append(20.0 * math.log10(magnitude) if magnitude > 0.0 else -99.0)
         data["phase_deg"].append(float(phase))
     if not data["freqs"]:
         raise RuntimeError("音频闭环扫频没有得到任何有效频点")
     return data, calibration, warnings
 
 
-def _run_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
-    if use_buffer:
-        return _run_rtl_hardware_sweep(use_buffer)
-    return _run_audio_loopback_sweep()
+def _run_hardware_sweep(mode: str, cal_path: str) -> tuple[dict, dict, list[str]]:
+    """A3: 根据 mode 严格选择硬件链路，绝不自动降级"""
+    if mode == "rtl":
+        _ensure_rtl_design() # A1
+        return _run_rtl_hardware_sweep(cal_path == "buffer")
+    else:
+        return _run_audio_loopback_sweep()
 
 
-def _run_ai(data: dict, is_real: bool) -> tuple[dict | None, str | None]:
+def _run_ai(data: dict, is_real: bool, data_source: str) -> tuple[dict | None, str | None]:
     try:
         from diagnosis_system.ml.infer import predict_topology
-
-        result = predict_topology(data)
-        result["model_note"] = (
-            "模型推理基于当前硬件扫频数据"
-            if is_real
-            else "演示 CSV + 预训练演示模型，不代表硬件实测"
-        )
+        # 修复：把 data_source 传给 infer.py
+        result = predict_topology(data, data_source=data_source)
         return result, None
     except Exception as exc:
         return None, str(exc)
@@ -194,7 +187,6 @@ def status():
     source = _runtime_source()
     try:
         import calibration as cal
-
         calibration = _calibration_state(cal)
     except Exception as exc:
         calibration = {"calibrated": False, "message": str(exc)}
@@ -203,11 +195,7 @@ def status():
             "status": "success",
             "source": source,
             "calibration": calibration,
-            "points": (
-                AUDIO_SWEEP_POINTS
-                if source["mode"] == "pynq_audio_loopback"
-                else SWEEP_POINTS
-            ),
+            "points": (AUDIO_SWEEP_POINTS if source["mode"] == "pynq_audio_loopback" else SWEEP_POINTS),
         }
     )
 
@@ -216,26 +204,12 @@ def status():
 def iq_acceptance():
     source = _runtime_source()
     if source["mode"] != "pynq_audio_loopback":
-        return jsonify(
-            {
-                "status": "error",
-                "msg": "当前不是 PYNQ 官方音频闭环环境",
-            }
-        ), 400
+        return jsonify({"status": "error", "msg": "当前不是 PYNQ 官方音频闭环环境"}), 400
     try:
         frequency_hz = float(request.args.get("freq", "1000"))
         repeats = max(1, min(int(request.args.get("repeats", "3")), 5))
-        measurement = _get_audio_driver().measure_repeated(
-            frequency_hz,
-            repeats=repeats,
-        )
-        return jsonify(
-            {
-                "status": "success",
-                "source": source,
-                "measurement": measurement,
-            }
-        )
+        measurement = _get_audio_driver().measure_repeated(frequency_hz, repeats=repeats)
+        return jsonify({"status": "success", "source": source, "measurement": measurement})
     except Exception as exc:
         app.logger.exception("I/Q 验收失败")
         return jsonify({"status": "error", "msg": str(exc)}), 500
@@ -244,24 +218,29 @@ def iq_acceptance():
 @app.route("/api/start_sweep", methods=["POST"])
 def start_sweep():
     payload = request.get_json(silent=True) or {}
-    use_buffer = bool(payload.get("use_buffer", False))
-    source = _runtime_source()
+    
+    mode = payload.get("mode", "rtl")
+    cal_path = payload.get("cal_path", "direct")
+    if payload.get("use_buffer") is True:
+        cal_path = "buffer"
+
+    source = _runtime_source(mode)
 
     try:
         if source["mode"] == "demo_csv":
             time.sleep(0.2)
             data = _load_demo_csv()
-            calibration = {
-                "calibrated": False,
-                "message": "演示 CSV 未经过本次硬件校准",
-            }
+            calibration = {"calibrated": False, "message": "演示 CSV 未经过本次硬件校准"}
+            sweep_warnings = []
         else:
-            data, calibration, sweep_warnings = _run_hardware_sweep(use_buffer)
+            data, calibration, sweep_warnings = _run_hardware_sweep(mode, cal_path)
+            
     except Exception as exc:
         app.logger.exception("扫频失败")
         return jsonify({"status": "error", "msg": str(exc)}), 500
 
-    ai_result, ai_error = _run_ai(data, source["is_real"])
+    ai_result, ai_error = _run_ai(data, source["is_real"], source["mode"])
+    
     response = {
         "status": "success",
         "source": source,
@@ -270,25 +249,19 @@ def start_sweep():
         "ai": ai_result,
         "warnings": [],
     }
-    if source["mode"] in ("pynq_hardware", "pynq_audio_loopback"):
+    
+    if sweep_warnings:
         response["warnings"].extend(sweep_warnings)
     if ai_error:
         response["warnings"].append("AI 推理未完成：%s" % ai_error)
     if not source["is_real"]:
-        response["warnings"].append(
-            "当前展示的是演示 CSV，不是 PYNQ 硬件测量结果。"
-        )
+        response["warnings"].append("当前展示的是演示 CSV，不是 PYNQ 硬件测量结果。")
     if source["is_real"] and not calibration.get("calibrated"):
-        response["warnings"].append(
-            "校准表为空；曲线为未校准原始测量，不能宣称已校准。"
-        )
+        response["warnings"].append("校准表为空；曲线为未校准原始测量，不能宣称已校准。")
+        
     return jsonify(response)
 
 
 if __name__ == "__main__":
-    if platform.system() != "Windows":
-        from audio_loopback import AudioLoopback
-
-        AUDIO_LOOPBACK_DRIVER = AudioLoopback()
-        AUDIO_LOOPBACK_DRIVER.initialize()
+    # 删除了底部多余的初始化，交由懒加载
     app.run(host="0.0.0.0", port=5000, debug=False)
