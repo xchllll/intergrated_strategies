@@ -10,7 +10,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT_DIR))  # A4: 修复路径
+sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "board"))
 sys.path.insert(0, str(ROOT_DIR / "python_model"))
 sys.path.insert(0, str(ROOT_DIR / "data"))
@@ -22,9 +22,11 @@ SWEEP_POINTS = 240
 AUDIO_SWEEP_POINTS = 12
 AUDIO_LOOPBACK_DRIVER = None
 
+# 【修复 3】全局标志位：保证自定义 bitstream 只在第一次扫频时烧录
+_RTL_DESIGN_LOADED = False
 
-def _runtime_source(mode: str = "auto") -> dict:
-    """A2: Return the active acquisition path without pretending demo data is real."""
+
+def _runtime_source(mode: str = "rtl") -> dict:
     if platform.system() == "Windows":
         return {
             "mode": "demo_csv",
@@ -49,12 +51,25 @@ def _runtime_source(mode: str = "auto") -> dict:
     }
 
 
-def _calibration_state(calibration_module) -> dict:
+def _calibration_state(calibration_module, cal_path: str = "direct") -> dict:
+    """【修复 2】根据当前路径（direct/buffer）如实返回校准状态"""
     try:
         calibration_module.ensure_calibration_loaded()
-        return calibration_module.calibration_status()
+        
+        # 检查底层表里是否真的存在对应路径的校准数据
+        has_path_data = False
+        if hasattr(calibration_module, "CAL_TABLE") and calibration_module.CAL_TABLE:
+            for row in calibration_module.CAL_TABLE:
+                if row.get(cal_path):
+                    has_path_data = True
+                    break
+                    
+        if has_path_data:
+            return {"calibrated": True, "message": f"已加载 {cal_path} 校准表"}
+        else:
+            return {"calibrated": False, "message": f"未找到 {cal_path} 路径的校准数据，当前为原始测量"}
     except Exception as exc:
-        return {"calibrated": False, "message": "校准状态读取失败：%s" % exc}
+        return {"calibrated": False, "message": f"校准状态读取失败：{exc}"}
 
 
 def _load_demo_csv() -> dict:
@@ -81,11 +96,15 @@ def _log_spaced_freqs(start_hz: float, stop_hz: float, count: int) -> list[float
 
 
 def _ensure_rtl_design():
-    """A1: 扫频前先配 codec、再烧自定义 bitstream"""
+    """【修复 3】防止每次扫频都重烧，只在第一次调用"""
+    global _RTL_DESIGN_LOADED
+    if _RTL_DESIGN_LOADED:
+        return
     import acceptance
     # 顺序绝对不能反：configure_codec 会加载 base.bit，把自定义设计冲掉
     acceptance.configure_codec()
     acceptance.load_design(acceptance.ensure_bitstream(), 1e8)
+    _RTL_DESIGN_LOADED = True
 
 
 def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
@@ -93,7 +112,9 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     import ps_ctrl
 
     cal.ensure_calibration_loaded()
-    cal_status = cal.calibration_status()
+    cal_path_str = "buffer" if use_buffer else "direct"
+    cal_status = _calibration_state(cal, cal_path_str) # 使用修复后的状态函数
+    
     cal_path = cal.CAL_PATH_BUFFER if use_buffer else cal.CAL_PATH_DIRECT
 
     data = {"freqs": [], "mag_db": [], "phase_deg": []}
@@ -122,11 +143,11 @@ def _log_frequencies(start_hz: float, stop_hz: float, count: int) -> list[float]
     return [start_hz * math.exp(index * step) for index in range(count)]
 
 
-def _get_audio_driver():
+def _get_audio_driver(force_reinit: bool = False):
+    """【修复 4】强制重建模式，应对切换模式时 UIO 被覆盖的问题"""
     global AUDIO_LOOPBACK_DRIVER
-    from audio_loopback import AudioLoopback
-
-    if AUDIO_LOOPBACK_DRIVER is None:
+    if force_reinit or AUDIO_LOOPBACK_DRIVER is None:
+        from audio_loopback import AudioLoopback
         AUDIO_LOOPBACK_DRIVER = AudioLoopback()
         AUDIO_LOOPBACK_DRIVER.initialize()
     return AUDIO_LOOPBACK_DRIVER
@@ -135,13 +156,16 @@ def _get_audio_driver():
 def _run_audio_loopback_sweep() -> tuple[dict, dict, list[str]]:
     import calibration as cal
     cal.ensure_calibration_loaded()
-    calibration = cal.calibration_status()
+    # 音频闭环默认走 direct 的校准，但我们强制返回未校准提示，因为音频特性差异太大
+    calibration = _calibration_state(cal, "direct")
     warnings = []
     if not calibration.get("calibrated"):
         warnings.append("校准表为空；曲线为官方音频闭环的未校准原始测量。")
 
     data = {"freqs": [], "mag_db": [], "phase_deg": []}
-    driver = _get_audio_driver()
+    # 【修复 4】每次进入 audio 模式强制重新初始化，防止之前 RTL 加载把 UIO 冲掉
+    driver = _get_audio_driver(force_reinit=True)
+    
     for freq in _log_frequencies(100.0, 10000.0, AUDIO_SWEEP_POINTS):
         measurement = driver.capture(freq)
         if (measurement["peak_bin_ratio"] < 50.0 or abs(measurement["frequency_error_hz"]) > max(30.0, freq * 0.02)):
@@ -159,18 +183,25 @@ def _run_audio_loopback_sweep() -> tuple[dict, dict, list[str]]:
 
 
 def _run_hardware_sweep(mode: str, cal_path: str) -> tuple[dict, dict, list[str]]:
-    """A3: 根据 mode 严格选择硬件链路，绝不自动降级"""
     if mode == "rtl":
-        _ensure_rtl_design() # A1
+        _ensure_rtl_design()
         return _run_rtl_hardware_sweep(cal_path == "buffer")
     else:
         return _run_audio_loopback_sweep()
 
 
 def _run_ai(data: dict, is_real: bool, data_source: str) -> tuple[dict | None, str | None]:
+    # 【修复 5】audio 模式强行拦截 AI，绝不用 12 个声卡点去跑 240 点的模型
+    if data_source == "pynq_audio_loopback":
+        return {
+            "label": "不适用",
+            "confidence": 0.0,
+            "top3": [],
+            "model_note": "【拦截】官方音频闭环数据无物理相位参考且频点太少，不执行 AI 拓扑推理。"
+        }, None
+
     try:
         from diagnosis_system.ml.infer import predict_topology
-        # 修复：把 data_source 传给 infer.py
         result = predict_topology(data, data_source=data_source)
         return result, None
     except Exception as exc:
@@ -187,7 +218,8 @@ def status():
     source = _runtime_source()
     try:
         import calibration as cal
-        calibration = _calibration_state(cal)
+        # 默认展示 direct 状态
+        calibration = _calibration_state(cal, "direct")
     except Exception as exc:
         calibration = {"calibrated": False, "message": str(exc)}
     return jsonify(
@@ -208,7 +240,7 @@ def iq_acceptance():
     try:
         frequency_hz = float(request.args.get("freq", "1000"))
         repeats = max(1, min(int(request.args.get("repeats", "3")), 5))
-        measurement = _get_audio_driver().measure_repeated(frequency_hz, repeats=repeats)
+        measurement = _get_audio_driver(force_reinit=True).measure_repeated(frequency_hz, repeats=repeats)
         return jsonify({"status": "success", "source": source, "measurement": measurement})
     except Exception as exc:
         app.logger.exception("I/Q 验收失败")
@@ -219,8 +251,15 @@ def iq_acceptance():
 def start_sweep():
     payload = request.get_json(silent=True) or {}
     
-    mode = payload.get("mode", "rtl")
-    cal_path = payload.get("cal_path", "direct")
+    # 【修复 1】严格白名单校验
+    mode = str(payload.get("mode", "rtl")).lower()
+    if mode not in ["rtl", "audio"]:
+        mode = "rtl"
+        
+    cal_path = str(payload.get("cal_path", "direct")).lower()
+    if cal_path not in ["direct", "buffer"]:
+        cal_path = "direct"
+        
     if payload.get("use_buffer") is True:
         cal_path = "buffer"
 
@@ -257,11 +296,10 @@ def start_sweep():
     if not source["is_real"]:
         response["warnings"].append("当前展示的是演示 CSV，不是 PYNQ 硬件测量结果。")
     if source["is_real"] and not calibration.get("calibrated"):
-        response["warnings"].append("校准表为空；曲线为未校准原始测量，不能宣称已校准。")
+        response["warnings"].append("校准表为空或缺少对应路径；曲线为未校准原始测量。")
         
     return jsonify(response)
 
 
 if __name__ == "__main__":
-    # 删除了底部多余的初始化，交由懒加载
     app.run(host="0.0.0.0", port=5000, debug=False)
