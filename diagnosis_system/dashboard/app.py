@@ -144,9 +144,11 @@ def _log_frequencies(start_hz: float, stop_hz: float, count: int) -> list[float]
 
 
 def _get_audio_driver(force_reinit: bool = False):
-    """【修复 4】强制重建模式，应对切换模式时 UIO 被覆盖的问题"""
-    global AUDIO_LOOPBACK_DRIVER
+    global AUDIO_LOOPBACK_DRIVER, _RTL_DESIGN_LOADED
     if force_reinit or AUDIO_LOOPBACK_DRIVER is None:
+        # 【P0-2 修复】只要初始化音频，说明 PL 被 reset 了，必须把标志位拉回 False
+        _RTL_DESIGN_LOADED = False
+        
         from audio_loopback import AudioLoopback
         AUDIO_LOOPBACK_DRIVER = AudioLoopback()
         AUDIO_LOOPBACK_DRIVER.initialize()
@@ -216,10 +218,14 @@ def index():
 @app.route("/api/status", methods=["GET"])
 def status():
     source = _runtime_source()
+    # 【P2 修复】从 URL 参数读取 cal_path，默认 direct
+    req_cal_path = request.args.get("cal_path", "direct")
+    if req_cal_path not in ["direct", "buffer"]:
+        req_cal_path = "direct"
+        
     try:
         import calibration as cal
-        # 默认展示 direct 状态
-        calibration = _calibration_state(cal, "direct")
+        calibration = _calibration_state(cal, req_cal_path)
     except Exception as exc:
         calibration = {"calibrated": False, "message": str(exc)}
     return jsonify(
