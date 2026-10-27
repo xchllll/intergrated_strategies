@@ -13,12 +13,20 @@ from ml.gen_mock import CLASSES
 _model = None
 
 def get_model():
+    """优先加载与 sklearn 版本无关的 JSON；没有 JSON 时回退到 joblib。"""
     global _model
     if _model is None:
-        model_path = os.path.join(os.path.dirname(__file__), "model", "topo_mlp.joblib")
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"找不到模型文件: {model_path}，请先运行 train.py")
-        _model = joblib.load(model_path)
+        model_dir = os.path.join(os.path.dirname(__file__), "model")
+        json_path = os.path.join(model_dir, "topo_mlp.json")
+        if os.path.exists(json_path):
+            from ml.json_infer import JsonModel
+            _model = JsonModel(json_path)
+        else:
+            joblib_path = os.path.join(model_dir, "topo_mlp.joblib")
+            if not os.path.exists(joblib_path):
+                raise FileNotFoundError(
+                    "找不到模型文件: %s 或 %s，请先运行 train.py" % (json_path, joblib_path))
+            _model = joblib.load(joblib_path)
     return _model
 
 def predict_topology(sweep_dict, data_source="demo"):
