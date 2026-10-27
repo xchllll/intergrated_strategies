@@ -13,7 +13,8 @@ import zipfile
 from pathlib import Path
 
 BOARD_DIR = Path(__file__).resolve().parent
-ROOT_DIR = BOARD_DIR.parent
+# 兼容两种部署位置：仓库中的 board/ 子目录，或直接部署到 project/ 根目录
+ROOT_DIR = BOARD_DIR.parent if (BOARD_DIR.parent / "python_model").is_dir() else BOARD_DIR
 BIT_PATH = BOARD_DIR / "design_1_wrapper.bit"
 XSA_PATH = BOARD_DIR / "design_1_wrapper.xsa"
 DEFAULT_OUTPUT = ROOT_DIR / "data" / "acceptance_latest.json"
