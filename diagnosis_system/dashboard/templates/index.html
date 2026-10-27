@@ -156,7 +156,7 @@
 
     <section class="panel controls">
         <div class="switch-wrap">
-            <span>启用缓冲器（电压跟随）</span>
+            <span>校准路径：缓冲器</span>
             <label class="switch">
                 <input id="buffer-toggle" type="checkbox">
                 <span class="slider"></span>
@@ -173,8 +173,8 @@
                 <h2>幅频特性</h2>
                 <div id="magnitude-plot" class="plot"></div>
             </article>
-            <article class="panel chart-panel">
-                <h2>相频特性</h2>
+            <article class="panel chart-panel" id="phase-container">
+                <h2 id="phase-title">相频特性</h2>
                 <div id="phase-plot" class="plot"></div>
             </article>
         </div>

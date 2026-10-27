@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
-    drawBode([], [], []);
+    drawBode([], [], [], 'demo_csv');
     loadStatus();
 });
 
@@ -17,10 +17,20 @@ async function loadStatus() {
 
 function applyStatus(source, calibration) {
     const sourceBadge = document.getElementById('source-badge');
-    sourceBadge.textContent = source.label;
-    sourceBadge.className = 'badge ' + (source.is_real ? 'badge-real' : 'badge-demo');
-
     const calibrationBadge = document.getElementById('calibration-badge');
+
+    // 根据 mode 精确设置 Badge
+    if (source.mode === 'pynq_rtl') {
+        sourceBadge.textContent = '自研 PL 解调实测';
+        sourceBadge.className = 'badge badge-real'; // 绿色
+    } else if (source.mode === 'pynq_audio_loopback') {
+        sourceBadge.textContent = '官方音频闭环（仅幅值）';
+        sourceBadge.className = 'badge badge-demo'; // 蓝色
+    } else {
+        sourceBadge.textContent = '演示数据';
+        sourceBadge.className = 'badge badge-demo'; // 蓝色
+    }
+
     calibrationBadge.textContent = calibration.calibrated ? '已加载校准表' : '未校准';
     calibrationBadge.className = 'badge ' + (calibration.calibrated ? 'badge-real' : 'badge-warning');
 
@@ -39,10 +49,16 @@ async function startSweep() {
     setNotice('正在读取数据并计算 Bode 曲线...', false);
 
     try {
+        // A2: 模式拆分，默认请求 rtl 自研模式
+        const payload = {
+            mode: "rtl", 
+            cal_path: bufferEnabled ? "buffer" : "direct"
+        };
+
         const response = await fetch('/api/start_sweep', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ use_buffer: bufferEnabled })
+            body: JSON.stringify(payload)
         });
         const result = await response.json();
         if (!response.ok || result.status !== 'success') {
@@ -50,7 +66,15 @@ async function startSweep() {
         }
 
         applyStatus(result.source, result.calibration);
-        drawBode(result.data.freqs, result.data.mag_db, result.data.phase_deg);
+        
+        // 把真实的 source.mode 传给画图函数
+        drawBode(
+            result.data.freqs, 
+            result.data.mag_db, 
+            result.data.phase_deg, 
+            result.source.mode
+        );
+        
         renderAi(result.ai);
 
         if (result.warnings && result.warnings.length) {
@@ -87,48 +111,62 @@ function setNotice(message, isWarning) {
     element.className = isWarning ? 'notice notice-warning' : 'notice';
 }
 
-function drawBode(freqs, magnitude, phase) {
+// B 核心逻辑：根据模式动态绘图
+function drawBode(freqs, magnitude, phase, mode) {
+    // 1. 动态判断坐标轴标题
+    const isAudio = (mode === 'pynq_audio_loopback');
+    const magYAxisTitle = isAudio ? '电平 (dBFS)' : '增益 (dB)';
+
     const magnitudeTrace = {
-        x: freqs,
-        y: magnitude,
-        type: 'scatter',
-        mode: 'lines+markers',
-        name: '幅频',
-        line: { color: '#1769e0', width: 2 },
-        marker: { size: 3 }
+        x: freqs, y: magnitude, type: 'scatter', mode: 'lines+markers',
+        name: '幅频', line: { color: '#1769e0', width: 2 }, marker: { size: 3 }
     };
     const magnitudeLayout = {
         xaxis: { type: 'log', title: '频率 (Hz)', gridcolor: '#e8edf3' },
-        yaxis: { title: '幅值 (dB)', gridcolor: '#e8edf3' },
-        margin: { t: 12, b: 48, l: 58, r: 20 },
-        height: 310,
-        plot_bgcolor: 'transparent',
-        paper_bgcolor: 'transparent'
+        yaxis: { title: magYAxisTitle, gridcolor: '#e8edf3' }, // 使用动态标题
+        margin: { t: 12, b: 48, l: 58, r: 20 }, height: 310,
+        plot_bgcolor: 'transparent', paper_bgcolor: 'transparent'
     };
-    Plotly.react('magnitude-plot', [magnitudeTrace], magnitudeLayout, {
-        responsive: true,
-        displaylogo: false
-    });
+    Plotly.react('magnitude-plot', [magnitudeTrace], magnitudeLayout, { responsive: true, displaylogo: false });
 
-    const phaseTrace = {
-        x: freqs,
-        y: phase,
-        type: 'scatter',
-        mode: 'lines+markers',
-        name: '相频',
-        line: { color: '#d95c14', width: 2 },
-        marker: { size: 3 }
-    };
-    const phaseLayout = {
-        xaxis: { type: 'log', title: '频率 (Hz)', gridcolor: '#e8edf3' },
-        yaxis: { title: '相位 (度)', gridcolor: '#e8edf3' },
-        margin: { t: 12, b: 48, l: 58, r: 20 },
-        height: 310,
-        plot_bgcolor: 'transparent',
-        paper_bgcolor: 'transparent'
-    };
-    Plotly.react('phase-plot', [phaseTrace], phaseLayout, {
-        responsive: true,
-        displaylogo: false
-    });
+    // 2. 相频图的置灰处理
+    const phaseContainer = document.getElementById('phase-container');
+    const phaseTitle = document.getElementById('phase-title');
+
+    if (isAudio) {
+        // audio 模式：置灰并显示警告
+        phaseContainer.style.opacity = '0.4';
+        phaseTitle.textContent = '相频特性（无相干参考，相位无效）';
+        
+        // 传入空数据，或者一条平线
+        const phaseTrace = { x: freqs, y: [], type: 'scatter' };
+        Plotly.react('phase-plot', [phaseTrace], {
+            xaxis: { title: '频率 (Hz)' },
+            yaxis: { title: '相位 (度)', range: [-180, 180] },
+            annotations: [{
+                text: '官方音频闭环无物理相位参考',
+                xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, showarrow: false,
+                font: { size: 16, color: 'red' }
+            }],
+            margin: { t: 12, b: 48, l: 58, r: 20 }, height: 310,
+            plot_bgcolor: 'transparent', paper_bgcolor: 'transparent'
+        }, { responsive: true, displaylogo: false });
+        
+    } else {
+        // rtl 或 demo 模式：恢复正常显示
+        phaseContainer.style.opacity = '1';
+        phaseTitle.textContent = '相频特性';
+        
+        const phaseTrace = {
+            x: freqs, y: phase, type: 'scatter', mode: 'lines+markers',
+            name: '相频', line: { color: '#d95c14', width: 2 }, marker: { size: 3 }
+        };
+        const phaseLayout = {
+            xaxis: { type: 'log', title: '频率 (Hz)', gridcolor: '#e8edf3' },
+            yaxis: { title: '相位 (度)', gridcolor: '#e8edf3' },
+            margin: { t: 12, b: 48, l: 58, r: 20 }, height: 310,
+            plot_bgcolor: 'transparent', paper_bgcolor: 'transparent'
+        };
+        Plotly.react('phase-plot', [phaseTrace], phaseLayout, { responsive: true, displaylogo: false });
+    }
 }
