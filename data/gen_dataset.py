@@ -75,12 +75,22 @@ def measure_point(freq_hz, periods):
 
     积分点数 N 由 ps_ctrl.measure_once() 返回并原样传给
     calibration.calc_mag_phase()，保证归一化口径与硬件积分窗一致。
+
+    【单点异常护盾】真实扫频时，信号微弱/接触不良可能让某个频点的
+    ps_ctrl.measure_once() 等不到 out_done 而抛 RuntimeError（超时），
+    也可能在校准链路抛其他异常。这里整体 try-except，单点失败只记录
+    占位数据 (-99.0 dB, 0.0 deg) 并继续，避免 240 点扫频被一个坏点中断。
+    占位值在 CSV 中可被下游按 -99.0 过滤。
     """
-    acc_i, acc_q, window_n = ps_ctrl.measure_once(freq_hz, periods=periods)
-    mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
-    mag_cal, phase_cal = cal.apply_calibration(mag, phase, freq_hz)
-    mag_db = 20.0 * math.log10(mag_cal) if mag_cal > 0.0 else float("nan")
-    return mag_db, phase_cal
+    try:
+        acc_i, acc_q, window_n = ps_ctrl.measure_once(freq_hz, periods=periods)
+        mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
+        mag_cal, phase_cal = cal.apply_calibration(mag, phase, freq_hz)
+        mag_db = 20.0 * math.log10(mag_cal) if mag_cal > 0.0 else float("nan")
+        return mag_db, phase_cal
+    except Exception:
+        print(f"[ERROR] 频率 {freq_hz:.2f} Hz 测量超时/失败")
+        return -99.0, 0.0
 
 
 def main():
