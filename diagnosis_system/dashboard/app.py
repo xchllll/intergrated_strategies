@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import csv
 import math
+import os
 import platform
 import sys
 import time
 from pathlib import Path
+
+# 【永久修复 2】必须在 import pynq 之前让 XILINX_XRT 生效；
+# 否则 PYNQ 3.1 不会注册 EmbeddedDevice，且空设备列表会被永久缓存。
+os.environ.setdefault("XILINX_XRT", "/usr")
 
 from flask import Flask, jsonify, render_template, request
 
