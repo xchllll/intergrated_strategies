@@ -74,14 +74,19 @@ def _read_codec_register(fd: int, register: int):
 CODEC_CORE = (
     (0x400A, 0x00), (0x400C, 0x00), (0x400E, 0xB3), (0x400F, 0xB3),
     (0x4010, 0x01), (0x4014, 0x20), (0x4015, 0x00), (0x4019, 0x33),
-    (0x401C, 0x00), (0x401D, 0x00), (0x401E, 0x00), (0x401F, 0x00),
-    (0x4023, 0xE5), (0x4024, 0xE5), (0x4029, 0x03), (0x402A, 0x03),
+    # 0x401C/0x401E：播放混音器 bit5/bit6 = Left/Right DAC switch，
+    #               必须置位，否则 DAC 到不了 HP 输出（0x00 等于静音）。
+    # 0x4023/0x4024：HP 音量，bit1 = 静音开关；0xE5 是静音，0xE7 才是 0 dB 非静音。
+    (0x401C, 0x21), (0x401D, 0x00), (0x401E, 0x41), (0x401F, 0x00),
+    (0x4023, 0xE7), (0x4024, 0xE7), (0x4029, 0x03), (0x402A, 0x03),
+    # DAC 数字音量：0x00=0 dB，0xFF=-95.6 dB；0x20 ≈ -12 dB，避免 ADC 削顶。
+    (0x402B, 0x20), (0x402C, 0x20),
     (0x40F2, 0x01), (0x40F3, 0x01), (0x40F5, 0x01), (0x40F6, 0x01),
     (0x40F9, 0x7F), (0x40FA, 0x03),
 )
 CODEC_LINE_IN = ((0x400A, 0x01), (0x400B, 0x07),
                  (0x400C, 0x01), (0x400D, 0x07))
-CODEC_VERIFY = {0x400A: 0x01, 0x4019: 0x33, 0x4023: 0xE5,
+CODEC_VERIFY = {0x400A: 0x01, 0x4019: 0x33, 0x4023: 0xE7,
                 0x4024: 0xE5, 0x4029: 0x03, 0x402A: 0x03}
 
 
@@ -96,23 +101,18 @@ def configure_codec_direct() -> dict:
     fd = os.open("/dev/i2c-1", os.O_RDWR)
     try:
         fcntl.ioctl(fd, 0x0703, 0x3B)
-        pll_locked = False
-        for _ in range(5):
-            _write_codec_register(fd, 0x4000, 0x0E)
-            os.write(fd, bytes([0x40, 0x02, 0x02, 0x71,
-                                0x02, 0x3C, 0x21, 0x03]))
-            time.sleep(0.05)
-            os.write(fd, bytes([0x40, 0x02]))
-            pll = os.read(fd, 6)
-            if len(pll) >= 6 and (pll[5] & 0x02):
-                pll_locked = True
-                break
-        _write_codec_register(fd, 0x4000, 0x0F)
+        # 本板 codec PLL 无法锁定（libaudio config_audio_pll 轮询超时、
+        # PLL 模式下完全无声），改用 MCLK 直接作为内核时钟。
+        # 0x4000 = 0x01 → SYSCLK_EN=1, CORECLK_SRC=MCLK（旁路 PLL）。
+        # 要求 MCLK 与 1024*fs 匹配，即 LRCLK=48.828 kHz 时 MCLK≈50 MHz。
+        _write_codec_register(fd, 0x4000, 0x01)
+        pll_locked = True
         for register, value in CODEC_CORE:
             _write_codec_register(fd, register, value)
         for register, value in CODEC_LINE_IN:
             _write_codec_register(fd, register, value)
         return {"pll_locked": bool(pll_locked),
+                "clock_mode": "mclk_direct",
                 "regs": {reg: _read_codec_register(fd, reg)
                          for reg in CODEC_VERIFY}}
     finally:
