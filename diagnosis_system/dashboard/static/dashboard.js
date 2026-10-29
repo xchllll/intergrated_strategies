@@ -87,8 +87,7 @@ async function startSweep() {
             result.data.freqs, 
             result.data.mag_db, 
             result.data.phase_deg, 
-            result.source.mode,
-            result.data.phase_valid
+            result.source.mode
         );
         
         renderAi(result.ai);
@@ -128,14 +127,10 @@ function setNotice(message, isWarning) {
 }
 
 // B 核心逻辑：根据模式动态绘图
-function drawBode(freqs, magnitude, phase, mode, phaseValid) {
+function drawBode(freqs, magnitude, phase, mode) {
     // 1. 动态判断坐标轴标题
     const isAudio = (mode === 'pynq_audio_loopback');
     const magYAxisTitle = isAudio ? '电平 (dBFS)' : '增益 (dB)';
-    // 低信噪比频点的相位置空，Plotly 会断开该段，不再出现 0/±180 的假跳变
-    const phaseY = (Array.isArray(phaseValid) && phaseValid.length === phase.length)
-        ? phase.map((v, i) => (phaseValid[i] ? v : null))
-        : phase;
 
     const magnitudeTrace = {
         x: freqs, y: magnitude, type: 'scatter', mode: 'lines+markers',
@@ -178,7 +173,7 @@ function drawBode(freqs, magnitude, phase, mode, phaseValid) {
         phaseTitle.textContent = '相频特性';
         
         const phaseTrace = {
-            x: freqs, y: phaseY, type: 'scatter', mode: 'lines+markers',
+            x: freqs, y: phase, type: 'scatter', mode: 'lines+markers',
             name: '相频', line: { color: '#d95c14', width: 2 }, marker: { size: 3 }
         };
         const phaseLayout = {

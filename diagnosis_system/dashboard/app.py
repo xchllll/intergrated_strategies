@@ -4,7 +4,6 @@ import csv
 import math
 import os
 import platform
-import statistics
 import sys
 import time
 from pathlib import Path
@@ -79,7 +78,7 @@ def _calibration_state(calibration_module, cal_path: str = "direct") -> dict:
 
 
 def _load_demo_csv() -> dict:
-    data = {"freqs": [], "mag_db": [], "phase_deg": [], "phase_valid": []}
+    data = {"freqs": [], "mag_db": [], "phase_deg": []}
     if not DEMO_CSV.is_file():
         raise FileNotFoundError("找不到演示数据：%s" % DEMO_CSV)
 
@@ -88,7 +87,6 @@ def _load_demo_csv() -> dict:
             data["freqs"].append(float(row["freq"]))
             data["mag_db"].append(float(row["mag"]))
             data["phase_deg"].append(float(row["phase"]))
-            data["phase_valid"].append(True)
 
     if not data["freqs"]:
         raise ValueError("演示 CSV 为空：%s" % DEMO_CSV)
@@ -124,34 +122,19 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     
     cal_path = cal.CAL_PATH_BUFFER if use_buffer else cal.CAL_PATH_DIRECT
 
-    data = {"freqs": [], "mag_db": [], "phase_deg": [], "phase_valid": []}
-    raw_mags = []
+    data = {"freqs": [], "mag_db": [], "phase_deg": []}
     warnings = []
     start_hz = max(20.0, ps_ctrl.SAFE_MIN_FREQ_HZ)
     if start_hz > 20.0:
         warnings.append("为避免 48 位累加器在低频溢满量程，板端扫频从 %.1f Hz 开始。" % start_hz)
-
-    # 修复二/三：低频多积分周期 + 多次平均 + 整数周期频点（f_actual）
-    for freq in ps_ctrl.log_freqs(start_hz, 20000.0, SWEEP_POINTS):
-        acc_i, acc_q, window_n, f_actual = ps_ctrl.measure_avg(
-            freq, periods=ps_ctrl.periods_for_frequency(freq))
+        
+    for freq in _log_spaced_freqs(start_hz, 20000.0, SWEEP_POINTS):
+        acc_i, acc_q, window_n = ps_ctrl.measure_once(freq, periods=10)
         mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
-        mag_cal, phase_cal = cal.apply_calibration(mag, phase, f_actual,
-                                                   path=cal_path)
-        data["freqs"].append(f_actual)
+        mag_cal, phase_cal = cal.apply_calibration(mag, phase, freq, path=cal_path)
+        data["freqs"].append(freq)
         data["mag_db"].append(20.0 * math.log10(mag_cal) if mag_cal > 0 else -99.0)
         data["phase_deg"].append(phase_cal)
-        raw_mags.append(mag)
-
-    # 低频高衰减点的幅值可能接近噪声底，相位不可信：标记为无效，前端断线显示
-    if raw_mags:
-        floor = max(1e-9, statistics.median(raw_mags) * 0.01)
-        data["phase_valid"] = [m >= floor for m in raw_mags]
-        invalid = sum(1 for valid in data["phase_valid"] if not valid)
-        if invalid:
-            warnings.append(
-                "%d 个频点幅值低于噪声底（<中位数 1%%），相位不参与显示/校准。"
-                % invalid)
 
     if not data["freqs"]:
         raise RuntimeError("硬件扫频没有返回任何频点")
@@ -186,7 +169,7 @@ def _run_audio_loopback_sweep() -> tuple[dict, dict, list[str]]:
     if not calibration.get("calibrated"):
         warnings.append("校准表为空；曲线为官方音频闭环的未校准原始测量。")
 
-    data = {"freqs": [], "mag_db": [], "phase_deg": [], "phase_valid": []}
+    data = {"freqs": [], "mag_db": [], "phase_deg": []}
     # 【修复 4】每次进入 audio 模式强制重新初始化，防止之前 RTL 加载把 UIO 冲掉
     driver = _get_audio_driver(force_reinit=True)
     
@@ -201,7 +184,6 @@ def _run_audio_loopback_sweep() -> tuple[dict, dict, list[str]]:
         data["freqs"].append(float(freq))
         data["mag_db"].append(20.0 * math.log10(magnitude) if magnitude > 0.0 else -99.0)
         data["phase_deg"].append(float(phase))
-        data["phase_valid"].append(True)
     if not data["freqs"]:
         raise RuntimeError("音频闭环扫频没有得到任何有效频点")
     return data, calibration, warnings
