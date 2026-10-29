@@ -43,9 +43,28 @@ def _write_codec_register(fd: int, register: int, value: int) -> None:
 
 
 def _read_codec_register(fd: int, register: int):
-    os.write(fd, bytes([(register >> 8) & 0xFF, register & 0xFF]))
-    data = os.read(fd, 1)
-    return data[0] if data else None
+    # ADAU1761 reads need a repeated start: write the 2-byte register address,
+    # then read 1 byte in the same I2C_RDWR transfer.  The old os.write+os.read
+    # pair issued two separate transactions and could return the last written
+    # byte (0x03) or the previous register instead of the real value.
+    import ctypes
+    import fcntl
+
+    class _I2CMsg(ctypes.Structure):
+        _fields_ = [("addr", ctypes.c_uint16),
+                    ("flags", ctypes.c_uint16),
+                    ("len", ctypes.c_uint16),
+                    ("buf", ctypes.POINTER(ctypes.c_uint8))]
+
+    class _I2CRdwr(ctypes.Structure):
+        _fields_ = [("msgs", ctypes.POINTER(_I2CMsg)),
+                    ("nmsgs", ctypes.c_uint32)]
+
+    w = (ctypes.c_uint8 * 2)((register >> 8) & 0xFF, register & 0xFF)
+    r = (ctypes.c_uint8 * 1)()
+    msgs = (_I2CMsg * 2)(_I2CMsg(0x3B, 0, 2, w), _I2CMsg(0x3B, 1, 1, r))
+    fcntl.ioctl(fd, 0x0707, _I2CRdwr(msgs, 2))
+    return r[0]
 
 
 # Exact sequences from PYNQ libaudio.so (audio_adau1761.cpp), captured by
