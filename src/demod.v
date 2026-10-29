@@ -17,6 +17,8 @@ module demod (
     reg signed [31:0] mix_Q;
 
     // 核心逻辑：混频与累加
+    // 结构保持不变（mix 打一拍、acc 打一拍），不在 100 MHz 下制造
+    // “16x16 乘 + 48 位加”的纯组合长路径。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             // 复位清零
@@ -25,15 +27,19 @@ module demod (
             acc_I <= 48'd0;
             acc_Q <= 48'd0;
         end else if (clear) begin
-            // 收到 clear 信号时，累加器清零 (为下一个频点做准备)
+            // 收到 clear 信号时，累加器与乘积寄存器一起清零。
+            // ★ 修：以前只清 acc 不清 mix，上一轮最后一个乘积会残留下来，
+            //   在下一轮第一个 en 拍被加进 acc（旧频点的数据污染新频点）。
+            mix_I <= 32'd0;
+            mix_Q <= 32'd0;
             acc_I <= 48'd0;
             acc_Q <= 48'd0;
         end else if (en) begin
-            // 1. 混频 (16位 * 16位 = 32位)
+            // 1. 混频 (16位 * 16位 = 32位)，结果打一拍
             mix_I <= adc_in * ref_cos;
             mix_Q <= adc_in * ref_sin;
             
-            // 2. 积分累加 (48位)
+            // 2. 积分累加 (48位)，加的是上一拍的乘积
             acc_I <= acc_I + mix_I;
             acc_Q <= acc_Q + mix_Q;
         end

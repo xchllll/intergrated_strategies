@@ -49,10 +49,15 @@ ps_ctrl.py - PS 侧硬件控制驱动（PYNQ-Z2 / Zynq-7000）【溢出防护版
     故不采用，仅保留自动减周期 + 告警。）
 
 时序要点（top.v 行为）：
-    1) ps_start 拉低后状态机回到 IDLE，IDLE 态将解调累加器清零，
-       因此必须在 start 仍为高电平时回读结果（measure_once 已处理）。
-    2) ps_window_max 必须在 ps_start 拉高之前写入：MEASURE 态每个时钟
-       都在比较 timer >= ps_window_max，中途改窗长会破坏本次积分。
+    1) RTL 已增加结果锁存：积分窗满后先经 FLUSH 补上最后一个样本，再进入
+       DONE 并把 acc 搬进 latched_acc_I/Q；out_done 只在锁存有效后置起。
+       此后即使 ps_start 被拉低（状态机回到 IDLE、demod 的累加器被清零），
+       48 位结果也会一直保持到下一次测量启动时才清零。因此不再要求
+       "必须在 start 仍为高电平时回读"——DONE 之后晚一点取也不会丢；
+       measure_once() 依旧在 DONE 里直接取数，只是不再受这个时序约束。
+    2) ps_window_max 必须在 ps_start 拉高之前写入：MEASURE 态在
+       rx_data_valid 有效拍比较 sample_count + 1 >= ps_window_max，
+       中途改窗长会破坏本次积分。
 """
 
 import os
@@ -212,8 +217,9 @@ def set_window(freq_hz, periods=DEFAULT_PERIODS, auto_safe=True):
 def start_measure(duration_s=0.01):
     """拉高 start，保持 duration_s 秒后拉低（低层接口）。
 
-    注意：调用前必须已写好 ps_window_max（set_window），且应在 start
-    仍为高时回读结果；如需一步完成测量并取数，请使用 measure_once()。
+    注意：调用前必须已写好 ps_window_max（set_window）。RTL 已增加结果锁存，
+    start 拉低后 DONE 状态的结果仍会保持到下一次测量启动，因此不再要求
+    "必须在 start 仍为高时回读"；如需一步完成测量并取数，请使用 measure_once()。
     """
     gpio = _get_mmio(AXI_GPIO_0_BASE)
     gpio.write(REG_GPIO2_DATA, 0x1)          # 拉高 start

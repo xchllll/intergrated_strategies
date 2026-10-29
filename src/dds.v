@@ -4,6 +4,8 @@ module dds #(
     parameter integer DATA_W  = 16
 )(
     input  wire                     clk,
+    // 同步低电平复位：top 在每个测量窗口开始前拉低该信号，
+    // 强制相位累加器与输出寄存器归零，保证每次测量的相位基准固定为 0。
     input  wire                     rst_n,
     input  wire                     en,
     input  wire [PHASE_W-1:0]       phase_inc,
@@ -29,7 +31,10 @@ module dds #(
     // 注意：如果地址超过了 1023，它会自动溢出回绕，这正是我们想要的（转了一圈又回来了）
     assign addr_cos = addr_sin + 10'd256; 
 
-    always @(posedge clk or negedge rst_n) begin
+    // 同步复位：rst_n 有效时，在时钟沿把相位累加器和两路输出清零。
+    // 不能用异步复位，因为 top 的测量启动复位是由状态机译码产生的，
+    // 同步复位可以避免组合逻辑毛刺导致相位偶发清零。
+    always @(posedge clk) begin
         if (!rst_n) begin
             phase_acc <= {PHASE_W{1'b0}};
             sine      <= {DATA_W{1'b0}};
