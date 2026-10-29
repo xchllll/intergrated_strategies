@@ -27,8 +27,9 @@ ROOT_DIR = DIAGNOSIS_DIR.parent
 
 sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(DIAGNOSIS_DIR))
+sys.path.insert(0, str(ML_DIR))
 
-from common.features import extract_features, to_vector
+from common.features import extract_features, to_vector, FEATURE_ORDER
 from ml.gen_mock import build_sweeps, CLASSES
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
@@ -103,6 +104,16 @@ def main():
     print(f"   神经网络测试集准确率: {mlp_acc * 100:.2f}%")
     print(classification_report(y_test, mlp_preds, target_names=list(CLASSES.values())))
     joblib.dump(mlp_pipeline, model_dir / "topo_mlp.joblib")
+
+    # ===== 导出与库版本无关的 JSON（PYNQ 板子用 numpy 推理，不需要 sklearn）=====
+    from export_model import export_pipeline
+    json_path = export_pipeline(
+        mlp_pipeline,
+        model_dir / "topo_mlp.json",
+        meta={"feature_order": FEATURE_ORDER, "trained_on": "synthetic"},
+    )
+    print("   已导出 %s（不依赖 sklearn 版本，%.1f KB）"
+          % (json_path.name, json_path.stat().st_size / 1024.0))
 
     # ----------------- 生成混淆矩阵 -----------------
     print("\n4. 正在生成混淆矩阵图...")

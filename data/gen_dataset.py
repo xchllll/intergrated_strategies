@@ -41,6 +41,7 @@ import csv
 import math
 import os
 import sys
+from datetime import datetime
 
 # 允许从仓库任意位置运行：把 board/ 与 python_model/ 加入导入路径
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -58,6 +59,66 @@ DEFAULT_PERIODS = 10
 # 弱信号/失败频点的占位记录（dB 与度）
 PLACEHOLDER_MAG_DB = -99.0
 PLACEHOLDER_PHASE_DEG = 0.0
+
+# 网页每次扫频追加写入的历史数据（长表，一行一个频点）
+HISTORY_PATH = os.path.join(_HERE, "history.csv")
+HISTORY_FIELDS = [
+    "timestamp", "sweep_id", "mode", "freq_hz",
+    "mag_v_raw", "mag_db_raw", "phase_deg_raw", "phase_valid",
+]
+
+
+def append_history(data, mode="pynq_rtl", path=None, timestamp=None,
+                   sweep_id=None):
+    """把一次扫频的 **未校准** 数据追加到 data/history.csv。
+
+    由 dashboard 的 /api/start_sweep 在每次扫频后调用。只接受未校准数据：
+        freqs
+        mag_v_raw / phase_deg_raw   未校准原始幅值（V/FS）与相位（度）
+        phase_valid                 可选，低信噪比点标记
+    如果缺少原始列，直接报错，绝不把网页上可能已校准的 mag_db/phase_deg
+    写进 history.csv。
+    """
+    freqs = list(data.get("freqs") or [])
+    if not freqs:
+        raise ValueError("history 数据为空，未写入")
+
+    mags_raw = list(data.get("mag_v_raw") or [])
+    phases_raw = list(data.get("phase_deg_raw") or [])
+    valid = list(data.get("phase_valid") or [])
+    if len(mags_raw) != len(freqs) or len(phases_raw) != len(freqs):
+        raise ValueError(
+            "history 需要未校准的 mag_v_raw / phase_deg_raw（长度与 freqs 一致），"
+            "拒绝写入可能已校准的显示值")
+
+    now = datetime.now().astimezone()
+    ts = timestamp or now.isoformat(timespec="seconds")
+    sid = sweep_id or now.strftime("%Y%m%d-%H%M%S-%f")
+
+    path = path or HISTORY_PATH
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    new_file = (not os.path.isfile(path)) or os.path.getsize(path) == 0
+
+    with open(path, "a", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        if new_file:
+            writer.writerow(HISTORY_FIELDS)
+        for index, freq in enumerate(freqs):
+            mag_raw = float(mags_raw[index])
+            phase_raw = float(phases_raw[index])
+            if mag_raw < 0:
+                mag_raw = 0.0
+            mag_db_raw = (20.0 * math.log10(mag_raw)
+                          if mag_raw > 0.0 else PLACEHOLDER_MAG_DB)
+            is_valid = valid[index] if index < len(valid) else True
+            writer.writerow([
+                ts, sid, mode, "%.6f" % float(freq),
+                "%.9g" % mag_raw, "%.4f" % mag_db_raw,
+                "%.6f" % phase_raw, int(bool(is_valid)),
+            ])
+    return path
 
 
 def log_spaced_freqs(fstart, fstop, points):
