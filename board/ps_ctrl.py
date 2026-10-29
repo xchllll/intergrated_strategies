@@ -55,6 +55,7 @@ ps_ctrl.py - PS 侧硬件控制驱动（PYNQ-Z2 / Zynq-7000）【溢出防护版
        都在比较 timer >= ps_window_max，中途改窗长会破坏本次积分。
 """
 
+import math
 import os
 import time
 
@@ -111,6 +112,16 @@ ADC_FULL_SCALE_16BIT = 32767                      # 输入信号最坏情况（�
 SAFE_MAX_N = int(0.8 * ACC_FULL_SCALE / (ADC_FULL_SCALE_16BIT * LO_GAIN / 2.0))
 # 仅靠减小 periods 即可保证安全的频率下限（periods=1 时 N 仍 ≤ SAFE_MAX_N）：
 SAFE_MIN_FREQ_HZ = AUDIO_SAMPLE_RATE_HZ / SAFE_MAX_N
+
+# ---------------------------------------------------------------------------
+# 扫频 / 校准共用参数（修复二、三）
+# ---------------------------------------------------------------------------
+SWEEP_START_HZ = max(20.0, SAFE_MIN_FREQ_HZ)   # 网页扫频与校准表共用的起点
+SWEEP_STOP_HZ = 20000.0                        # 共用终点
+SWEEP_POINTS = 240                             # 共用频点数
+DEFAULT_REPEATS = 3                            # 每频点默认重复次数
+MAX_PERIODS_LOW_FREQ = 50                      # 低频最多积分周期数
+COHERENT_PHASE_SPREAD_DEG = 30.0               # 多次测量相位离散小于该值才做复数平均
 
 _mmio_cache = {}
 
@@ -247,6 +258,117 @@ def read_IQ():
         | (gpio_q.read(REG_GPIO_DATA) & 0xFFFFFFFF)
 
     return _to_signed_48(acc_i_raw), _to_signed_48(acc_q_raw)
+
+
+def log_freqs(start_hz=SWEEP_START_HZ, stop_hz=SWEEP_STOP_HZ,
+              count=SWEEP_POINTS):
+    """对数分布扫频频点（网页扫频与校准表共用同一套频点）。"""
+    if start_hz <= 0 or stop_hz <= start_hz or count < 2:
+        raise ValueError("扫频范围或点数无效")
+    ratio = (stop_hz / start_hz) ** (1.0 / (count - 1))
+    return [start_hz * ratio ** index for index in range(count)]
+
+
+def periods_for_frequency(freq_hz):
+    """低频多积分几个周期以提高信噪比；上限由 set_window 的溢出保护兜底。"""
+    if freq_hz <= 0:
+        raise ValueError("freq_hz 必须为正数")
+    target = int(round(200.0 / freq_hz * DEFAULT_PERIODS))
+    return max(DEFAULT_PERIODS, min(MAX_PERIODS_LOW_FREQ, target))
+
+
+def _wrap_deg(deg):
+    """把角度回绕到 (-180, 180]。"""
+    deg = math.fmod(deg, 360.0)
+    if deg > 180.0:
+        deg -= 360.0
+    elif deg <= -180.0:
+        deg += 360.0
+    return deg
+
+
+def measure_exact(freq_hz, periods=None, margin_s=0.05,
+                  poll_interval_s=0.002):
+    """整数周期测量：窗长 N 对应 periods 个完整周期，
+    实际频率取 f_actual = N * fs / periods，消除 2f 泄漏。
+
+    返回: (acc_I, acc_Q, window_n, f_actual_hz)
+    """
+    if freq_hz <= 0:
+        raise ValueError("freq_hz 必须为正数")
+    if periods is None:
+        periods = periods_for_frequency(freq_hz)
+
+    used_periods = _safe_periods(freq_hz, periods)
+    window_n = int(round(used_periods * AUDIO_SAMPLE_RATE_HZ / freq_hz))
+    if window_n < 1:
+        raise ValueError("积分窗长 N=%d < 1：请增大 periods 或降低频率"
+                         % window_n)
+    if window_n > 0xFFFFFFFF:
+        raise ValueError("积分窗长 N=%d 超出 32 位范围" % window_n)
+
+    f_actual = window_n * AUDIO_SAMPLE_RATE_HZ / used_periods
+    if f_actual >= AUDIO_SAMPLE_RATE_HZ / 2.0:
+        raise ValueError("f_actual=%.1f Hz 超过奈奎斯特" % f_actual)
+
+    phase_inc = int(round(f_actual * (2.0 ** 32) / FPGA_CLK_HZ)) & 0xFFFFFFFF
+    _get_mmio(AXI_GPIO_0_BASE).write(REG_GPIO_DATA, phase_inc)
+    _get_mmio(AXI_GPIO_1_BASE).write(REG_GPIO_DATA, window_n)
+
+    timeout_s = max(window_n / AUDIO_SAMPLE_RATE_HZ + margin_s, MIN_HOLD_S)
+    gpio = _get_mmio(AXI_GPIO_0_BASE)
+    gpio.write(REG_GPIO2_DATA, 0x1)
+    try:
+        deadline = time.monotonic() + timeout_s
+        done_seen = False
+        while time.monotonic() < deadline:
+            done_seen = read_done()
+            if done_seen:
+                acc_i, acc_q = read_IQ()
+                return acc_i, acc_q, window_n, f_actual
+            time.sleep(poll_interval_s)
+        raise RuntimeError(
+            "等待 out_done 超时（timeout=%.3f s，N=%d，f=%.1f Hz，"
+            "f_actual=%.1f Hz，fs=%.1f Hz，out_done=%d）"
+            % (timeout_s, window_n, freq_hz, f_actual,
+               AUDIO_SAMPLE_RATE_HZ, int(done_seen)))
+    finally:
+        gpio.write(REG_GPIO2_DATA, 0x0)
+
+
+def measure_avg(freq_hz, periods=None, repeats=None, margin_s=0.05):
+    """单频点多次测量（修复二）。
+
+    - 若各次相位接近（DDS 相位已复位、本振相干），把 I/Q 复数相加，
+      等效于更长积分，提高低频信噪比；
+    - 若相位离散（DDS 相位尚未复位），取 |I/Q| 最大的一次，
+      避免复数平均把信号抵消。
+
+    返回: (acc_I, acc_Q, window_n, f_actual_hz)
+    """
+    if repeats is None:
+        repeats = DEFAULT_REPEATS
+    repeats = max(1, int(repeats))
+    trials = [measure_exact(freq_hz, periods=periods, margin_s=margin_s)
+              for _ in range(repeats)]
+    if len(trials) == 1:
+        return trials[0]
+
+    phases = [math.degrees(math.atan2(q, i))
+              for i, q, _, _ in trials if (i or q)]
+    spread = 0.0
+    if len(phases) >= 2:
+        ref = phases[0]
+        spread = max(abs(_wrap_deg(p - ref)) for p in phases[1:])
+
+    if spread <= COHERENT_PHASE_SPREAD_DEG:
+        acc_i = sum(t[0] for t in trials)
+        acc_q = sum(t[1] for t in trials)
+        window_n = sum(t[2] for t in trials)
+        return acc_i, acc_q, window_n, trials[-1][3]
+
+    best = max(trials, key=lambda t: t[0] * t[0] + t[1] * t[1])
+    return best
 
 
 def measure_once(freq_hz, periods=DEFAULT_PERIODS, margin_s=0.05,
