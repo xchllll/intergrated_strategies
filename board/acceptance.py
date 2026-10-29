@@ -42,6 +42,83 @@ def _write_codec_register(fd: int, register: int, value: int) -> None:
     os.write(fd, bytes([(register >> 8) & 0xFF, register & 0xFF, value]))
 
 
+def _read_codec_register(fd: int, register: int):
+    # ADAU1761 reads need a repeated start: write the 2-byte register address,
+    # then read 1 byte in the same I2C_RDWR transfer.  The old os.write+os.read
+    # pair issued two separate transactions and could return the last written
+    # byte (0x03) or the previous register instead of the real value.
+    import ctypes
+    import fcntl
+
+    class _I2CMsg(ctypes.Structure):
+        _fields_ = [("addr", ctypes.c_uint16),
+                    ("flags", ctypes.c_uint16),
+                    ("len", ctypes.c_uint16),
+                    ("buf", ctypes.POINTER(ctypes.c_uint8))]
+
+    class _I2CRdwr(ctypes.Structure):
+        _fields_ = [("msgs", ctypes.POINTER(_I2CMsg)),
+                    ("nmsgs", ctypes.c_uint32)]
+
+    w = (ctypes.c_uint8 * 2)((register >> 8) & 0xFF, register & 0xFF)
+    r = (ctypes.c_uint8 * 1)()
+    msgs = (_I2CMsg * 2)(_I2CMsg(0x3B, 0, 2, w), _I2CMsg(0x3B, 1, 1, r))
+    fcntl.ioctl(fd, 0x0707, _I2CRdwr(msgs, 2))
+    return r[0]
+
+
+# Exact sequences from PYNQ libaudio.so (audio_adau1761.cpp), captured by
+# disassembling config_audio_codec / select_line_in.  Keeping them here lets us
+# reprogram the codec after load_design() through the custom design's PS I2C1,
+# without the BaseOverlay audio-codec-ctrl UIO.
+CODEC_CORE = (
+    (0x400A, 0x00), (0x400C, 0x00), (0x400E, 0xB3), (0x400F, 0xB3),
+    (0x4010, 0x01), (0x4014, 0x20), (0x4015, 0x00), (0x4019, 0x33),
+    (0x401C, 0x00), (0x401D, 0x00), (0x401E, 0x00), (0x401F, 0x00),
+    (0x4023, 0xE5), (0x4024, 0xE5), (0x4029, 0x03), (0x402A, 0x03),
+    (0x40F2, 0x01), (0x40F3, 0x01), (0x40F5, 0x01), (0x40F6, 0x01),
+    (0x40F9, 0x7F), (0x40FA, 0x03),
+)
+CODEC_LINE_IN = ((0x400A, 0x01), (0x400B, 0x07),
+                 (0x400C, 0x01), (0x400D, 0x07))
+CODEC_VERIFY = {0x400A: 0x01, 0x4019: 0x33, 0x4023: 0xE5,
+                0x4024: 0xE5, 0x4029: 0x03, 0x402A: 0x03}
+
+
+def configure_codec_direct() -> dict:
+    """Reprogram ADAU1761 after load_design() via the custom design's PS I2C1.
+
+    The BaseOverlay path uses libaudio/UIO; after the custom design is loaded
+    that UIO is gone, so the codec must be configured through /dev/i2c-1.
+    """
+    import fcntl
+
+    fd = os.open("/dev/i2c-1", os.O_RDWR)
+    try:
+        fcntl.ioctl(fd, 0x0703, 0x3B)
+        pll_locked = False
+        for _ in range(5):
+            _write_codec_register(fd, 0x4000, 0x0E)
+            os.write(fd, bytes([0x40, 0x02, 0x02, 0x71,
+                                0x02, 0x3C, 0x21, 0x03]))
+            time.sleep(0.05)
+            os.write(fd, bytes([0x40, 0x02]))
+            pll = os.read(fd, 6)
+            if len(pll) >= 6 and (pll[5] & 0x02):
+                pll_locked = True
+                break
+        _write_codec_register(fd, 0x4000, 0x0F)
+        for register, value in CODEC_CORE:
+            _write_codec_register(fd, register, value)
+        for register, value in CODEC_LINE_IN:
+            _write_codec_register(fd, register, value)
+        return {"pll_locked": bool(pll_locked),
+                "regs": {reg: _read_codec_register(fd, reg)
+                         for reg in CODEC_VERIFY}}
+    finally:
+        os.close(fd)
+
+
 def configure_codec() -> dict:
     """Initialize ADAU1761 while the BaseOverlay AXI-IIC is still present."""
     import fcntl
@@ -112,11 +189,15 @@ def load_design(bit_path: Path, clock_hz: float) -> dict:
             "FCLK_CLK0 设置失败：请求 %.3f MHz，实际 %.3f MHz"
             % (requested_mhz, actual_mhz)
         )
+    # The BaseOverlay audio-codec-ctrl UIO is gone once the custom design is
+    # loaded; reprogram the codec through the custom design's PS I2C1.
+    codec_direct = configure_codec_direct()
     return {
         "_overlay": overlay,
         "loaded_path": str(design_path),
         "clock_before_mhz": before_mhz,
         "clock_actual_mhz": actual_mhz,
+        "codec_direct": codec_direct,
     }
 
 
