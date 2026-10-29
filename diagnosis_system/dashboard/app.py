@@ -78,15 +78,21 @@ def _calibration_state(calibration_module, cal_path: str = "direct") -> dict:
 
 
 def _load_demo_csv() -> dict:
-    data = {"freqs": [], "mag_db": [], "phase_deg": []}
+    data = {"freqs": [], "mag_db": [], "phase_deg": [],
+            "mag_v_raw": [], "phase_deg_raw": []}
     if not DEMO_CSV.is_file():
         raise FileNotFoundError("找不到演示数据：%s" % DEMO_CSV)
 
     with DEMO_CSV.open("r", encoding="utf-8-sig", newline="") as fh:
         for row in csv.DictReader(fh):
+            mag_db = float(row["mag"])
+            phase = float(row["phase"])
             data["freqs"].append(float(row["freq"]))
-            data["mag_db"].append(float(row["mag"]))
-            data["phase_deg"].append(float(row["phase"]))
+            data["mag_db"].append(mag_db)
+            data["phase_deg"].append(phase)
+            data["mag_v_raw"].append(
+                10.0 ** (mag_db / 20.0) if mag_db > -90.0 else 0.0)
+            data["phase_deg_raw"].append(phase)
 
     if not data["freqs"]:
         raise ValueError("演示 CSV 为空：%s" % DEMO_CSV)
@@ -122,7 +128,8 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     
     cal_path = cal.CAL_PATH_BUFFER if use_buffer else cal.CAL_PATH_DIRECT
 
-    data = {"freqs": [], "mag_db": [], "phase_deg": []}
+    data = {"freqs": [], "mag_db": [], "phase_deg": [],
+            "mag_v_raw": [], "phase_deg_raw": []}
     warnings = []
     start_hz = max(20.0, ps_ctrl.SAFE_MIN_FREQ_HZ)
     if start_hz > 20.0:
@@ -135,6 +142,8 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
         data["freqs"].append(freq)
         data["mag_db"].append(20.0 * math.log10(mag_cal) if mag_cal > 0 else -99.0)
         data["phase_deg"].append(phase_cal)
+        data["mag_v_raw"].append(mag)
+        data["phase_deg_raw"].append(phase)
 
     if not data["freqs"]:
         raise RuntimeError("硬件扫频没有返回任何频点")
@@ -169,7 +178,8 @@ def _run_audio_loopback_sweep() -> tuple[dict, dict, list[str]]:
     if not calibration.get("calibrated"):
         warnings.append("校准表为空；曲线为官方音频闭环的未校准原始测量。")
 
-    data = {"freqs": [], "mag_db": [], "phase_deg": []}
+    data = {"freqs": [], "mag_db": [], "phase_deg": [],
+            "mag_v_raw": [], "phase_deg_raw": []}
     # 【修复 4】每次进入 audio 模式强制重新初始化，防止之前 RTL 加载把 UIO 冲掉
     driver = _get_audio_driver(force_reinit=True)
     
@@ -180,10 +190,13 @@ def _run_audio_loopback_sweep() -> tuple[dict, dict, list[str]]:
             continue
         magnitude = measurement["amplitude_full_scale"]
         phase = measurement["phase_deg"]
+        magnitude_raw, phase_raw = magnitude, phase
         magnitude, phase = cal.apply_calibration(magnitude, phase, freq, path=cal.CAL_PATH_DIRECT)
         data["freqs"].append(float(freq))
         data["mag_db"].append(20.0 * math.log10(magnitude) if magnitude > 0.0 else -99.0)
         data["phase_deg"].append(float(phase))
+        data["mag_v_raw"].append(float(magnitude_raw))
+        data["phase_deg_raw"].append(float(phase_raw))
     if not data["freqs"]:
         raise RuntimeError("音频闭环扫频没有得到任何有效频点")
     return data, calibration, warnings
@@ -258,6 +271,24 @@ def iq_acceptance():
         return jsonify({"status": "error", "msg": str(exc)}), 500
 
 
+def _record_history(data, source):
+    """把本次扫频的未校准数据追加到 data/history.csv。
+
+    gen_dataset.append_history 只接受 mag_v_raw / phase_deg_raw，
+    不会把网页上可能已校准的 mag_db / phase_deg 写进历史。
+    """
+    try:
+        import gen_dataset
+        path = gen_dataset.append_history(
+            data,
+            mode=source.get("mode", "unknown"),
+        )
+        return path, None
+    except Exception as exc:
+        app.logger.exception("历史数据写入失败")
+        return None, str(exc)
+
+
 @app.route("/api/start_sweep", methods=["POST"])
 def start_sweep():
     payload = request.get_json(silent=True) or {}
@@ -289,6 +320,9 @@ def start_sweep():
         app.logger.exception("扫频失败")
         return jsonify({"status": "error", "msg": str(exc)}), 500
 
+    # 每次网页扫频都把同一份未校准数据追加到 data/history.csv
+    _history_path, history_error = _record_history(data, source)
+
     ai_result, ai_error = _run_ai(data, source["is_real"], source["mode"])
     
     response = {
@@ -304,6 +338,8 @@ def start_sweep():
         response["warnings"].extend(sweep_warnings)
     if ai_error:
         response["warnings"].append("AI 推理未完成：%s" % ai_error)
+    if history_error:
+        response["warnings"].append("历史数据写入失败：%s" % history_error)
     if not source["is_real"]:
         response["warnings"].append("当前展示的是演示 CSV，不是 PYNQ 硬件测量结果。")
     if source["is_real"] and not calibration.get("calibrated"):
