@@ -24,7 +24,9 @@ import argparse
 import csv
 import math
 import os
+import statistics
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "python_model"))
@@ -102,6 +104,18 @@ def main():
                         help="历史数据 CSV（默认 data/history.csv）")
     parser.add_argument("--table", default=DEFAULT_TABLE,
                         help="校准表 JSON（默认 data/calibration_table.json）")
+    parser.add_argument("--min-mag", type=float, default=cal.MIN_VALID_MAG,
+                        help="低于该幅值(ADC码)视为无信号，跳过（默认 %.0f）"
+                        % cal.MIN_VALID_MAG)
+    parser.add_argument("--drop-db", type=float, default=40.0,
+                        help="低于本表中位数该 dB 数的点判为弱信号并跳过（默认 40）")
+    parser.add_argument("--min-gain", type=float, default=1e-8,
+                        help="幅值增益下限（默认 1e-8，主要靠 --drop-db 判据）")
+    parser.add_argument("--max-gain", type=float, default=1e8,
+                        help="幅值增益上限（默认 1e8，主要靠 --drop-db 判据）")
+    parser.add_argument("--dac-volume", type=lambda s: int(s, 0), default=0x10,
+                        help="标定时 DAC 数字音量寄存器 0x402B 的值（默认 0x10）")
+    parser.add_argument("--note", default="", help="写进校准表元数据的备注")
     parser.add_argument("--sweep", choices=("latest", "all"), default="latest",
                         help="latest=只取最近一次网页扫频（默认）；all=全部历史")
     parser.add_argument("--mode", default="pynq_rtl",
@@ -137,13 +151,16 @@ def main():
                 "历史中没有 mode=%s 的数据（可用 --mode any 查看全部）"
                 % args.mode)
 
+    latest = (max((row.get("sweep_id", "") for row in rows), default="")
+              if rows else "")
     if args.sweep == "latest":
-        latest = max((row.get("sweep_id", "") for row in rows), default="")
         rows = [row for row in rows if row.get("sweep_id", "") == latest]
         print("使用最近一次扫频：sweep_id=%s（%d 行）" % (latest, len(rows)))
 
-    points = {}
+    # 第一遍：只按绝对门限筛掉明显没信号的
+    cand = {}
     skipped = 0
+    dropped_weak = 0
     for row in rows:
         if not _is_valid(row):
             skipped += 1
@@ -153,25 +170,56 @@ def main():
             skipped += 1
             continue
         freq, mag, phase = parsed
-        points[freq] = (mag, phase)
+        if not cal.phase_is_valid(mag, args.min_mag):
+            dropped_weak += 1          # 幅值太小，相位只是噪声
+            continue
+        cand[freq] = (mag, phase)
+
+    if not cand:
+        raise SystemExit("没有可用的频点（检查 phase_valid / mag_v_raw）")
+
+    # 第二遍：相对判据——比本表中位数低 drop_db 以上的点也丢掉。
+    # 幅值单位是 ADC 码，绝对门限不好定；相对门限与单位无关。
+    med = statistics.median([v[0] for v in cand.values()])
+    floor = med * 10.0 ** (-args.drop_db / 20.0)
+    points = {}
+    for freq, (mag, phase) in cand.items():
+        if mag < floor:
+            dropped_weak += 1
+            continue
+        gain = args.ref_amp / mag
+        if not (args.min_gain <= gain <= args.max_gain):
+            dropped_weak += 1
+            continue
+        points[freq] = (mag, phase, gain)
 
     if not points:
         raise SystemExit("没有可用的频点（检查 phase_valid / mag_v_raw）")
 
     table = _load_table(args.table)
     for freq in sorted(points):
-        mag, phase = points[freq]
+        _mag, phase, gain = points[freq]
         key = round(float(freq), 6)
         row = table.setdefault(key, {"freq": float(freq)})
-        row[args.state] = {
-            "mag_gain": args.ref_amp / mag,
-            "phase_offset_deg": _wrap180(-phase),
-        }
+        # v2：写复数系数（权威值）+ 便于人读的幅值/相位字段
+        row[args.state] = cal.make_cal_entry(gain, -phase)
 
     cal.CAL_TABLE = [table[key] for key in sorted(table)]
+    cal.CAL_META.update({
+        "format": cal.CAL_FORMAT_VERSION,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "ref_amp": args.ref_amp,
+        "dac_volume": args.dac_volume,
+        "state": args.state,
+        "sweep_id": latest if args.sweep == "latest" else "all",
+        "history": os.path.abspath(args.history),
+        "note": args.note,
+    })
     cal.save_calibration_table(args.table)
-    print("已写入 %s：%s 路径 %d 个频点（跳过 %d 个无效点；参考幅值 %.4g）"
-          % (args.table, args.state, len(points), skipped, args.ref_amp))
+    print("已写入 %s：%s 路径 %d 个频点（无效 %d、弱信号/异常增益 %d；"
+          "参考幅值 %.4g，DAC 音量 0x%02X）"
+          % (args.table, args.state, len(points), skipped, dropped_weak,
+             args.ref_amp, args.dac_volume))
     return 0
 
 

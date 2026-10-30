@@ -94,6 +94,7 @@ def _load_demo_csv() -> dict:
                 10.0 ** (mag_db / 20.0) if mag_db > -90.0 else 0.0)
             data["phase_deg_raw"].append(phase)
 
+    data["phase_valid"] = [1 if v > 0 else 0 for v in data["mag_v_raw"]]
     if not data["freqs"]:
         raise ValueError("演示 CSV 为空：%s" % DEMO_CSV)
     return data
@@ -118,11 +119,24 @@ def _ensure_rtl_design():
     _RTL_DESIGN_LOADED = True
 
 
+def _current_dac_volume():
+    """读 CODEC_CORE 里 0x402B(DAC 数字音量) 的值，供校准表元数据比对。"""
+    try:
+        import acceptance
+        for reg, val in getattr(acceptance, "CODEC_CORE", ()):
+            if reg == 0x402B:
+                return val
+    except Exception:  # noqa: BLE001 非板端环境取不到也无所谓
+        pass
+    return None
+
+
 def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     import calibration as cal
     import ps_ctrl
 
     cal.ensure_calibration_loaded()
+    cal.note_driver(dac_volume=_current_dac_volume())
     cal_path_str = "buffer" if use_buffer else "direct"
     cal_status = _calibration_state(cal, cal_path_str) # 使用修复后的状态函数
     
@@ -145,6 +159,8 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
         data["mag_v_raw"].append(mag)
         data["phase_deg_raw"].append(phase)
 
+    data["phase_valid"] = [1 if cal.phase_is_valid(v) else 0
+                           for v in data["mag_v_raw"]]
     if not data["freqs"]:
         raise RuntimeError("硬件扫频没有返回任何频点")
     return data, cal_status, warnings
@@ -197,6 +213,8 @@ def _run_audio_loopback_sweep() -> tuple[dict, dict, list[str]]:
         data["phase_deg"].append(float(phase))
         data["mag_v_raw"].append(float(magnitude_raw))
         data["phase_deg_raw"].append(float(phase_raw))
+    data["phase_valid"] = [1 if cal.phase_is_valid(v) else 0
+                           for v in data["mag_v_raw"]]
     if not data["freqs"]:
         raise RuntimeError("音频闭环扫频没有得到任何有效频点")
     return data, calibration, warnings
