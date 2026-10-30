@@ -157,8 +157,9 @@ def main():
                         help="DUT 输入端已知幅值（默认 1.0，做相对标定）")
     parser.add_argument("--repeat", type=int, default=3,
                         help="扫频次数，逐频点复数平均（默认 3）")
-    parser.add_argument("--budget", type=float, default=15.0,
-                        help="single-sweep time budget in seconds (0=off)")
+    parser.add_argument("--budget", type=float, default=None,
+                        help="single-sweep time budget in seconds; "
+                             "default follows ps_ctrl.SWEEP_TIME_BUDGET_S (0=off)")
     parser.add_argument("--n-target", type=float, default=None,
                         help="target integration samples per point (default 2500)")
     parser.add_argument("--periods", type=float, default=None,
@@ -220,6 +221,9 @@ def main():
         print("[1/4] 跳过设计加载（--no-load）")
 
     import ps_ctrl
+
+    if args.budget is None:            # 默认跟随 ps_ctrl 的全局预算
+        args.budget = ps_ctrl.SWEEP_TIME_BUDGET_S
 
     start_hz = args.start_hz
     if start_hz is None:

@@ -105,10 +105,10 @@ REG_RANGE = 0x1000             # AXI GPIO 地址段长度（4096 字节）
 DEFAULT_PERIODS = 10           # 默认积分窗覆盖的信号周期数（整数）
 # 决定稳定度的是积分样本数 N（实测各频点稳到 cv<=0.15% 所需 N 都在 1000~2000），
 # 所以按"每点积分时间恒定"给周期数：periods = n_target*f/fs，再夹在 [p_min, p_max]。
-PERIODS_N_TARGET = 2500.0   # 目标积分样本数（越大越稳、越慢）
-PERIODS_MIN = 3.0           # 低频下限：20 Hz 实测需 >=3 个周期
+PERIODS_N_TARGET = 1000.0   # 目标积分样本数（越大越稳、越慢）
+PERIODS_MIN = 10.0          # 低频下限：低频抖动约按 1/periods 下降
 PERIODS_MAX = 1000.0        # 高频上限
-SWEEP_TIME_BUDGET_S = 15.0  # 单轮扫频目标用时上限（秒）
+SWEEP_TIME_BUDGET_S = 20.0  # 单轮扫频目标用时上限（秒）
 
 MIN_HOLD_S = 1e-3              # start 保持的最短时长（秒），留足状态机裕量
 
@@ -297,23 +297,32 @@ def build_period_schedule(freqs, n_target=PERIODS_N_TARGET, p_min=PERIODS_MIN,
     freqs = [float(f) for f in freqs]
     n = float(n_target)
 
-    def _build(nn):
-        return [periods_for_freq(f, nn, p_min, p_max) for f in freqs]
+    def _build(nn, pp=None):
+        return [periods_for_freq(f, nn, p_min if pp is None else pp, p_max)
+                for f in freqs]
 
     def _cost(arr):
         return sum(p / f for p, f in zip(arr, freqs))
 
     ps = _build(n)
     total = _cost(ps)
-    for _ in range(8):
-        if not budget_s or total <= budget_s or n <= min_n:
+    # 超预算时：先把低频下限 p_min 降下来（低频全按 p_min 走的点最费时间），
+    # 降到 1 还不够再降 n_target。
+    pm = float(p_min)
+    for _ in range(24):
+        if not budget_s or total <= budget_s:
             break
-        n = max(min_n, n * (budget_s / total) * 0.98)
-        ps = _build(n)
+        if pm > 1.0:
+            pm = max(1.0, pm * (budget_s / total) * 0.98)
+        elif n > min_n:
+            n = max(min_n, n * (budget_s / total) * 0.98)
+        else:
+            break
+        ps = _build(n, pm)
         total = _cost(ps)
 
     ps = [max(1.0, round(p, 2)) for p in ps]
-    return ps, {"predicted_s": total, "n_target": n,
+    return ps, {"predicted_s": total, "n_target": n, "p_min": pm,
                 "min": min(ps) if ps else 0.0, "max": max(ps) if ps else 0.0}
 
 
