@@ -247,24 +247,43 @@ def calibration_status():
     }
 
 
-def ensure_calibration_loaded(path=None):
-    """若校准表文件存在且内存表为空，则加载之；返回是否已有可用校准数据。
+_CAL_FILE_STAMP = None      # (mtime, size) of the table currently in memory
 
-    建议在扫频前调用一次（gen_dataset.py / app.py 的扫频入口），使校准自动生效；
-    加载失败只提示一次，不阻断测量。
+
+def ensure_calibration_loaded(path=None):
+    """确保内存里的校准表与磁盘文件一致（支持热重载）；返回是否已有可用校准数据。
+
+    建议在扫频前调用一次（dashboard / gen_dataset.py 的扫频入口）。行为：
+      * 文件没变 -> 直接返回，不重读；
+      * 文件被重新生成（mtime/size 变化）-> 自动重读，无需重启网页；
+      * 文件被删除 -> 清空内存表（回到未校准）；
+      * 加载失败 -> 提示一次，沿用当前内存表，不阻断测量。
     """
-    global CAL_TABLE
+    global CAL_TABLE, _CAL_FILE_STAMP
     path = path or CAL_TABLE_DEFAULT_PATH
-    if CAL_TABLE:
+
+    stamp = None
+    if os.path.isfile(path):
+        try:
+            stamp = (os.path.getmtime(path), os.path.getsize(path))
+        except OSError:
+            stamp = None
+
+    if stamp is not None and stamp == _CAL_FILE_STAMP and CAL_TABLE:
         return True
-    if not os.path.isfile(path):
+    if stamp is None:
+        if CAL_TABLE:
+            CAL_TABLE.clear()
+            _CAL_FILE_STAMP = None
+            print("校准表文件不存在，已清空内存表（回到未校准）")
         return False
     try:
         load_calibration_table(path)
+        _CAL_FILE_STAMP = stamp
     except Exception as exc:  # noqa: BLE001 加载失败不阻断测量，仅提示一次
         _warn_once("cal_load", "加载校准表 %s 失败（%s），本次测量将使用未校准值"
                    % (path, exc))
-        return False
+        return bool(CAL_TABLE)
     print("已加载校准表：%s（%d 个频点）" % (path, len(CAL_TABLE)))
     return bool(CAL_TABLE)
 
