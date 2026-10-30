@@ -158,8 +158,8 @@ def main():
     parser.add_argument("--repeat", type=int, default=3,
                         help="扫频次数，逐频点复数平均（默认 3）")
     parser.add_argument("--budget", type=float, default=None,
-                        help="single-sweep time budget in seconds; "
-                             "default follows ps_ctrl.SWEEP_TIME_BUDGET_S (0=off)")
+                        help="single-sweep time budget in seconds (0=off, default off); "
+                             "0 means keep the periods schedule fixed even if slow")
     parser.add_argument("--n-target", type=float, default=None,
                         help="target integration samples per point (default 2500)")
     parser.add_argument("--periods", type=float, default=None,
@@ -239,10 +239,12 @@ def main():
         if args.n_target is not None:
             kw["n_target"] = args.n_target
         period_list, pinfo = ps_ctrl.build_period_schedule(freqs, **kw)
+        budget_txt = ("不限制" if not args.budget else "%.0f s" % args.budget)
         print("      每点周期数 %.0f ~ %.0f (20kHz=%.0f), 目标样本数 %.0f, "
-              "预测单轮 %.1f s, 预算 %.0f s"
+              "预测单轮 %.1f s, 时长预算 %s, 超时保护 %.0f s"
               % (pinfo["min"], pinfo["max"], period_list[-1],
-                 pinfo["n_target"], pinfo["predicted_s"], args.budget))
+                 pinfo["n_target"], pinfo["predicted_s"], budget_txt,
+                 args.sweep_timeout))
 
     print("[2/4] 扫频 %d 点 x %d 次（%.2f Hz ~ %.0f Hz）"
           % (len(freqs), args.repeat, freqs[0], freqs[-1]))
@@ -263,8 +265,9 @@ def main():
         print("    [扫频] %s 完成：用时 %.1f s（%d 点，平均 %.1f ms/点）"
               % (tag, elapsed, len(freqs), elapsed / len(freqs) * 1000.0))
         if args.budget and elapsed > args.budget and k + 1 < args.repeat:
+            # 仅在显式给了 --budget 时才收缩；默认 0 = 保持调度不变
             period_list = [max(ps_ctrl.PERIODS_MIN, p * 0.85) for p in period_list]
-            print("      [budget] over %.0f s -> low band periods x0.85 next round"
+            print("      [budget] over %.0f s -> periods x0.85 next round"
                   % args.budget)
 
     # ---- 2. 复数平均 ----

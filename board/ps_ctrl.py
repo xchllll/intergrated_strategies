@@ -108,7 +108,8 @@ DEFAULT_PERIODS = 10           # 默认积分窗覆盖的信号周期数（整�
 PERIODS_N_TARGET = 1000.0   # 目标积分样本数（越大越稳、越慢）
 PERIODS_MIN = 10.0          # 低频下限：低频抖动约按 1/periods 下降
 PERIODS_MAX = 1000.0        # 高频上限
-SWEEP_TIME_BUDGET_S = 20.0  # 单轮扫频目标用时上限（秒）
+SWEEP_TIME_BUDGET_S = 0.0   # 单轮扫频用时预算：0=不限制（接负载后扫频会变慢，
+                            #   不希望调度被自动压缩；超时保护见 calibrate_path）
 
 MIN_HOLD_S = 1e-3              # start 保持的最短时长（秒），留足状态机裕量
 
