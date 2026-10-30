@@ -455,8 +455,13 @@ def save_calibration_table(path):
         "meta": CAL_META,
         "rows": CAL_TABLE,
     }
-    with open(path, "w", encoding="utf-8") as fh:
+    # 先写临时文件再原子替换：中途失败（异常/断电）不会把原表截成 0 字节
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 def load_calibration_table(path):
@@ -466,8 +471,20 @@ def load_calibration_table(path):
     加载时自动转换为新结构（buffer 路径留空，apply_calibration 会提示）。
     """
     global CAL_TABLE, CAL_META
-    with open(path, "r", encoding="utf-8") as fh:
-        data = json.load(fh)
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        _warn_once("cal_zero", "校准表文件为空或不存在：%s，按空表处理" % path)
+        CAL_TABLE = []
+        CAL_META = {}
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except ValueError as exc:
+        _warn_once("cal_badjson", "校准表 JSON 解析失败（%s）：%s，按空表处理"
+                   % (exc, path))
+        CAL_TABLE = []
+        CAL_META = {}
+        return
 
     CAL_META = {}
     if isinstance(data, dict):                 # v2

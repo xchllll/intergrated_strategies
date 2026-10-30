@@ -157,10 +157,10 @@ def main():
                         help="DUT 输入端已知幅值（默认 1.0，做相对标定）")
     parser.add_argument("--repeat", type=int, default=3,
                         help="扫频次数，逐频点复数平均（默认 3）")
-    parser.add_argument("--budget", type=float, default=25.0,
+    parser.add_argument("--budget", type=float, default=15.0,
                         help="single-sweep time budget in seconds (0=off)")
-    parser.add_argument("--knee-hz", type=float, default=None,
-                        help="knee frequency where periods start to grow (default 200)")
+    parser.add_argument("--n-target", type=float, default=None,
+                        help="target integration samples per point (default 2500)")
     parser.add_argument("--periods", type=float, default=None,
                         help="override periods for every point (default: auto by frequency)")
     parser.add_argument("--points", type=int, default=SWEEP_POINTS,
@@ -232,13 +232,13 @@ def main():
                  "scale_low": 1.0, "min": args.periods, "max": args.periods}
     else:
         kw = {"budget_s": args.budget}
-        if args.knee_hz is not None:
-            kw["knee_hz"] = args.knee_hz
+        if args.n_target is not None:
+            kw["n_target"] = args.n_target
         period_list, pinfo = ps_ctrl.build_period_schedule(freqs, **kw)
-        print("      每点周期数 %.0f ~ %.0f (20kHz=%.0f), 预测单轮 %.1f s, "
-              "预算 %.0f s, 低频段缩放 %.2f"
+        print("      每点周期数 %.0f ~ %.0f (20kHz=%.0f), 目标样本数 %.0f, "
+              "预测单轮 %.1f s, 预算 %.0f s"
               % (pinfo["min"], pinfo["max"], period_list[-1],
-                 pinfo["predicted_s"], args.budget, pinfo["scale_low"]))
+                 pinfo["n_target"], pinfo["predicted_s"], args.budget))
 
     print("[2/4] 扫频 %d 点 x %d 次（%.2f Hz ~ %.0f Hz）"
           % (len(freqs), args.repeat, freqs[0], freqs[-1]))
@@ -259,8 +259,7 @@ def main():
         print("    [扫频] %s 完成：用时 %.1f s（%d 点，平均 %.1f ms/点）"
               % (tag, elapsed, len(freqs), elapsed / len(freqs) * 1000.0))
         if args.budget and elapsed > args.budget and k + 1 < args.repeat:
-            period_list = [p * 0.85 if f <= ps_ctrl.PERIODS_KNEE_HZ else p
-                           for p, f in zip(period_list, freqs)]
+            period_list = [max(ps_ctrl.PERIODS_MIN, p * 0.85) for p in period_list]
             print("      [budget] over %.0f s -> low band periods x0.85 next round"
                   % args.budget)
 

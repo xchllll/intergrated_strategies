@@ -103,11 +103,12 @@ REG_RANGE = 0x1000             # AXI GPIO 地址段长度（4096 字节）
 
 # 测量参数
 DEFAULT_PERIODS = 10           # 默认积分窗覆盖的信号周期数（整数）
-PERIODS_BASE = DEFAULT_PERIODS
-PERIODS_KNEE_HZ = 200.0
-PERIODS_EXPONENT = 0.8
-PERIODS_MAX = 500
-SWEEP_TIME_BUDGET_S = 25.0
+# 决定稳定度的是积分样本数 N（实测各频点稳到 cv<=0.15% 所需 N 都在 1000~2000），
+# 所以按"每点积分时间恒定"给周期数：periods = n_target*f/fs，再夹在 [p_min, p_max]。
+PERIODS_N_TARGET = 2500.0   # 目标积分样本数（越大越稳、越慢）
+PERIODS_MIN = 3.0           # 低频下限：20 Hz 实测需 >=3 个周期
+PERIODS_MAX = 1000.0        # 高频上限
+SWEEP_TIME_BUDGET_S = 15.0  # 单轮扫频目标用时上限（秒）
 
 MIN_HOLD_S = 1e-3              # start 保持的最短时长（秒），留足状态机裕量
 
@@ -266,44 +267,53 @@ def read_IQ():
     return _to_signed_48(acc_i_raw), _to_signed_48(acc_q_raw)
 
 
-def periods_for_freq(freq_hz, base=PERIODS_BASE, knee_hz=PERIODS_KNEE_HZ,
-                     exponent=PERIODS_EXPONENT, max_periods=PERIODS_MAX):
-    """单个频点应积分的周期数：不高于 knee 用 base，高于则按 (f/knee)^exp 增长。"""
-    if freq_hz <= knee_hz:
-        return float(base)
-    return float(min(max_periods, base * (freq_hz / knee_hz) ** exponent))
+def periods_for_freq(freq_hz, n_target=PERIODS_N_TARGET, p_min=PERIODS_MIN,
+                     p_max=PERIODS_MAX):
+    """单个频点应积分的周期数。
+
+    实测规律：决定稳定度的是**积分样本数 N**，而不是周期数本身
+    （各频点稳到 cv<=0.15% 所需的 N 大致都在 1000~2000）。
+    所以这里按"每点积分时间恒定"来给周期数：
+
+        periods(f) = clamp(n_target * f / AUDIO_SAMPLE_RATE_HZ, p_min, p_max)
+
+    低频受 p_min 下限保护（20 Hz 实测需要 >=3 个周期），高频受 p_max 封顶。
+    """
+    p = n_target * freq_hz / AUDIO_SAMPLE_RATE_HZ
+    return float(min(p_max, max(p_min, p)))
 
 
-def build_period_schedule(freqs, base=PERIODS_BASE, knee_hz=PERIODS_KNEE_HZ,
-                          exponent=PERIODS_EXPONENT, max_periods=PERIODS_MAX,
-                          budget_s=SWEEP_TIME_BUDGET_S, min_scale=0.2):
-    """按频点给出每轮扫频用的周期数，并按时间预算压缩低频段。
+def build_period_schedule(freqs, n_target=PERIODS_N_TARGET, p_min=PERIODS_MIN,
+                          p_max=PERIODS_MAX, budget_s=SWEEP_TIME_BUDGET_S,
+                          min_n=200.0):
+    """按频点给出每轮扫频用的周期数，并按时间预算收缩。
 
-    单点耗时约等于 periods / f，整轮耗时约等于 sum(periods_i / f_i)。
-    若预测值超过 budget_s，就把 f <= knee_hz 的低频段 periods 整体缩小
-    （不低于 base*min_scale 且至少 1 个周期），高频段保持不变。
+    单点耗时约等于 periods / f；整轮耗时约等于 sum(periods_i / f_i)。
+    若预测值超过 budget_s，就按比例降低 n_target（等价于缩短每点积分时间）
+    重算，直到落进预算；n_target 不低于 min_n。
 
-    返回 (periods_list, info)，info 含 predicted_s / scale_low / min / max。
+    返回 (periods_list, info)，info 含 predicted_s / n_target / min / max。
     """
     freqs = [float(f) for f in freqs]
-    ps = [periods_for_freq(f, base, knee_hz, exponent, max_periods) for f in freqs]
+    n = float(n_target)
+
+    def _build(nn):
+        return [periods_for_freq(f, nn, p_min, p_max) for f in freqs]
 
     def _cost(arr):
         return sum(p / f for p, f in zip(arr, freqs))
 
+    ps = _build(n)
     total = _cost(ps)
-    scale = 1.0
-    if budget_s and total > budget_s:
-        low = [i for i, f in enumerate(freqs) if f <= knee_hz]
-        low_cost = sum(ps[i] / freqs[i] for i in low)
-        high_cost = total - low_cost
-        if low_cost > 0:
-            scale = max(min_scale, min(1.0, (budget_s - high_cost) / low_cost))
-            for i in low:
-                ps[i] = ps[i] * scale
-            total = _cost(ps)
+    for _ in range(8):
+        if not budget_s or total <= budget_s or n <= min_n:
+            break
+        n = max(min_n, n * (budget_s / total) * 0.98)
+        ps = _build(n)
+        total = _cost(ps)
+
     ps = [max(1.0, round(p, 2)) for p in ps]
-    return ps, {"predicted_s": total, "scale_low": scale,
+    return ps, {"predicted_s": total, "n_target": n,
                 "min": min(ps) if ps else 0.0, "max": max(ps) if ps else 0.0}
 
 
