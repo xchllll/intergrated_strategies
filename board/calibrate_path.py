@@ -91,7 +91,8 @@ def sweep_once(freqs, periods, timeout_s=SWEEP_TIMEOUT_S, verbose=True, label=""
     out = []
     t0 = time.monotonic()
     for index, freq in enumerate(freqs):
-        acc_i, acc_q, window_n = ps_ctrl.measure_once(freq, periods=periods)
+        period = (periods[index] if isinstance(periods, (list, tuple)) else periods)
+        acc_i, acc_q, window_n = ps_ctrl.measure_once(freq, periods=period)
         mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
         out.append((freq, mag, phase))
         elapsed = time.monotonic() - t0
@@ -156,8 +157,12 @@ def main():
                         help="DUT 输入端已知幅值（默认 1.0，做相对标定）")
     parser.add_argument("--repeat", type=int, default=3,
                         help="扫频次数，逐频点复数平均（默认 3）")
-    parser.add_argument("--periods", type=int, default=10,
-                        help="每个频点的积分周期数（默认 10，与网页端一致）")
+    parser.add_argument("--budget", type=float, default=25.0,
+                        help="single-sweep time budget in seconds (0=off)")
+    parser.add_argument("--knee-hz", type=float, default=None,
+                        help="knee frequency where periods start to grow (default 200)")
+    parser.add_argument("--periods", type=float, default=None,
+                        help="override periods for every point (default: auto by frequency)")
     parser.add_argument("--points", type=int, default=SWEEP_POINTS,
                         help="扫频频点数（默认 240，须与网页端一致）")
     parser.add_argument("--sweep-timeout", type=float, default=SWEEP_TIMEOUT_S,
@@ -220,8 +225,23 @@ def main():
     if start_hz is None:
         start_hz = max(SWEEP_START_FLOOR_HZ, ps_ctrl.SAFE_MIN_FREQ_HZ)
     freqs = log_spaced_freqs(start_hz, args.stop_hz, args.points)
-    print("[2/4] 扫频 %d 点 x %d 次（%.2f Hz ~ %.0f Hz, periods=%d）"
-          % (len(freqs), args.repeat, freqs[0], freqs[-1], args.periods))
+    # 每点周期数：高频多积分；并按 --budget 压缩低频段，保证单轮时长可控
+    if args.periods is not None:
+        period_list = [float(args.periods)] * len(freqs)
+        pinfo = {"predicted_s": sum(p / f for p, f in zip(period_list, freqs)),
+                 "scale_low": 1.0, "min": args.periods, "max": args.periods}
+    else:
+        kw = {"budget_s": args.budget}
+        if args.knee_hz is not None:
+            kw["knee_hz"] = args.knee_hz
+        period_list, pinfo = ps_ctrl.build_period_schedule(freqs, **kw)
+        print("      每点周期数 %.0f ~ %.0f (20kHz=%.0f), 预测单轮 %.1f s, "
+              "预算 %.0f s, 低频段缩放 %.2f"
+              % (pinfo["min"], pinfo["max"], period_list[-1],
+                 pinfo["predicted_s"], args.budget, pinfo["scale_low"]))
+
+    print("[2/4] 扫频 %d 点 x %d 次（%.2f Hz ~ %.0f Hz）"
+          % (len(freqs), args.repeat, freqs[0], freqs[-1]))
     print("      注意：本次数据不会写入 history.csv")
 
     sweeps = []
@@ -230,7 +250,7 @@ def main():
         print("    [扫频] %s 开始 ..." % tag)
         t0 = time.monotonic()
         try:
-            sweep = sweep_once(freqs, args.periods, timeout_s=args.sweep_timeout,
+            sweep = sweep_once(freqs, period_list, timeout_s=args.sweep_timeout,
                                label=tag)
         except TimeoutError as exc:
             raise SystemExit("[扫频] 超时中止：%s" % exc)
@@ -238,6 +258,11 @@ def main():
         sweeps.append(sweep)
         print("    [扫频] %s 完成：用时 %.1f s（%d 点，平均 %.1f ms/点）"
               % (tag, elapsed, len(freqs), elapsed / len(freqs) * 1000.0))
+        if args.budget and elapsed > args.budget and k + 1 < args.repeat:
+            period_list = [p * 0.85 if f <= ps_ctrl.PERIODS_KNEE_HZ else p
+                           for p, f in zip(period_list, freqs)]
+            print("      [budget] over %.0f s -> low band periods x0.85 next round"
+                  % args.budget)
 
     # ---- 2. 复数平均 ----
     print("[3/4] 复数平均 ...")

@@ -149,8 +149,14 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     if start_hz > 20.0:
         warnings.append("为避免 48 位累加器在低频溢满量程，板端扫频从 %.1f Hz 开始。" % start_hz)
         
-    for freq in _log_spaced_freqs(start_hz, 20000.0, SWEEP_POINTS):
-        acc_i, acc_q, window_n = ps_ctrl.measure_once(freq, periods=10)
+    freqs = _log_spaced_freqs(start_hz, 20000.0, SWEEP_POINTS)
+    # 每点周期数随频率增加（高频更稳），并按时间预算压缩低频段；
+    # 与 board/calibrate_path.py 共用同一套调度，保证标定与测量条件一致
+    period_list, _pinfo = ps_ctrl.build_period_schedule(
+        freqs, budget_s=ps_ctrl.SWEEP_TIME_BUDGET_S)
+    for index, freq in enumerate(freqs):
+        period = period_list[index]
+        acc_i, acc_q, window_n = ps_ctrl.measure_once(freq, periods=period)
         mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
         mag_cal, phase_cal = cal.apply_calibration(mag, phase, freq, path=cal_path)
         data["freqs"].append(freq)

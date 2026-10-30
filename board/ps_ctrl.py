@@ -103,6 +103,12 @@ REG_RANGE = 0x1000             # AXI GPIO 地址段长度（4096 字节）
 
 # 测量参数
 DEFAULT_PERIODS = 10           # 默认积分窗覆盖的信号周期数（整数）
+PERIODS_BASE = DEFAULT_PERIODS
+PERIODS_KNEE_HZ = 200.0
+PERIODS_EXPONENT = 0.8
+PERIODS_MAX = 500
+SWEEP_TIME_BUDGET_S = 25.0
+
 MIN_HOLD_S = 1e-3              # start 保持的最短时长（秒），留足状态机裕量
 
 # ---------------------------------------------------------------------------
@@ -187,7 +193,12 @@ def set_window(freq_hz, periods=DEFAULT_PERIODS, auto_safe=True):
     """
     if freq_hz <= 0:
         raise ValueError("freq_hz 必须为正数，收到 %r" % freq_hz)
-    if not isinstance(periods, int) or periods < 1:
+    # 允许传入浮点（频率自适应调度给的就是浮点），四舍五入到整数周期
+    try:
+        periods = int(round(float(periods)))
+    except (TypeError, ValueError):
+        raise ValueError("periods 必须为正整数，收到 %r" % (periods,))
+    if periods < 1:
         raise ValueError("periods 必须为正整数，收到 %r" % (periods,))
 
     used_periods = periods
@@ -253,6 +264,47 @@ def read_IQ():
         | (gpio_q.read(REG_GPIO_DATA) & 0xFFFFFFFF)
 
     return _to_signed_48(acc_i_raw), _to_signed_48(acc_q_raw)
+
+
+def periods_for_freq(freq_hz, base=PERIODS_BASE, knee_hz=PERIODS_KNEE_HZ,
+                     exponent=PERIODS_EXPONENT, max_periods=PERIODS_MAX):
+    """单个频点应积分的周期数：不高于 knee 用 base，高于则按 (f/knee)^exp 增长。"""
+    if freq_hz <= knee_hz:
+        return float(base)
+    return float(min(max_periods, base * (freq_hz / knee_hz) ** exponent))
+
+
+def build_period_schedule(freqs, base=PERIODS_BASE, knee_hz=PERIODS_KNEE_HZ,
+                          exponent=PERIODS_EXPONENT, max_periods=PERIODS_MAX,
+                          budget_s=SWEEP_TIME_BUDGET_S, min_scale=0.2):
+    """按频点给出每轮扫频用的周期数，并按时间预算压缩低频段。
+
+    单点耗时约等于 periods / f，整轮耗时约等于 sum(periods_i / f_i)。
+    若预测值超过 budget_s，就把 f <= knee_hz 的低频段 periods 整体缩小
+    （不低于 base*min_scale 且至少 1 个周期），高频段保持不变。
+
+    返回 (periods_list, info)，info 含 predicted_s / scale_low / min / max。
+    """
+    freqs = [float(f) for f in freqs]
+    ps = [periods_for_freq(f, base, knee_hz, exponent, max_periods) for f in freqs]
+
+    def _cost(arr):
+        return sum(p / f for p, f in zip(arr, freqs))
+
+    total = _cost(ps)
+    scale = 1.0
+    if budget_s and total > budget_s:
+        low = [i for i, f in enumerate(freqs) if f <= knee_hz]
+        low_cost = sum(ps[i] / freqs[i] for i in low)
+        high_cost = total - low_cost
+        if low_cost > 0:
+            scale = max(min_scale, min(1.0, (budget_s - high_cost) / low_cost))
+            for i in low:
+                ps[i] = ps[i] * scale
+            total = _cost(ps)
+    ps = [max(1.0, round(p, 2)) for p in ps]
+    return ps, {"predicted_s": total, "scale_low": scale,
+                "min": min(ps) if ps else 0.0, "max": max(ps) if ps else 0.0}
 
 
 def measure_once(freq_hz, periods=DEFAULT_PERIODS, margin_s=0.05,
