@@ -44,6 +44,8 @@ DEFAULT_HISTORY = os.path.join(ROOT, "data", "history.csv")
 SWEEP_POINTS = 240
 SWEEP_STOP_HZ = 20000.0
 SWEEP_START_FLOOR_HZ = 20.0
+# 单轮扫频的默认超时（秒）。超过即中止并抛 TimeoutError。
+SWEEP_TIMEOUT_S = 120.0
 
 
 # ---------------------------------------------------------------------------
@@ -78,8 +80,12 @@ def load_design():
     return info, loaded
 
 
-def sweep_once(freqs, periods, verbose=True):
-    """按给定频点扫一遍，返回 [(freq, mag, phase), ...]（未校准）。"""
+def sweep_once(freqs, periods, timeout_s=SWEEP_TIMEOUT_S, verbose=True, label=""):
+    """按给定频点扫一遍，返回 [(freq, mag, phase), ...]（未校准）。
+
+    timeout_s > 0 时，单轮累计用时超过该值立即抛 TimeoutError（每测完一个
+    频点检查一次，所以不会等到整轮跑完才发现）。
+    """
     import ps_ctrl
 
     out = []
@@ -88,9 +94,13 @@ def sweep_once(freqs, periods, verbose=True):
         acc_i, acc_q, window_n = ps_ctrl.measure_once(freq, periods=periods)
         mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
         out.append((freq, mag, phase))
+        elapsed = time.monotonic() - t0
+        if timeout_s and elapsed > timeout_s:
+            raise TimeoutError(
+                "%s扫频超过 %.0f s 仍未结束（已完成 %d/%d 点，最后一点 %.1f Hz），已中止"
+                % (label, timeout_s, index + 1, len(freqs), freq))
         if verbose and (index + 1) % 60 == 0:
-            print("    ... %d/%d (%.1fs)" % (index + 1, len(freqs),
-                                             time.monotonic() - t0))
+            print("    ... %d/%d 点，已用 %.1f s" % (index + 1, len(freqs), elapsed))
     return out
 
 
@@ -150,6 +160,9 @@ def main():
                         help="每个频点的积分周期数（默认 10，与网页端一致）")
     parser.add_argument("--points", type=int, default=SWEEP_POINTS,
                         help="扫频频点数（默认 240，须与网页端一致）")
+    parser.add_argument("--sweep-timeout", type=float, default=SWEEP_TIMEOUT_S,
+                        help="单轮扫频的超时秒数，超过即中止（默认 %.0f，0=不限制）"
+                        % SWEEP_TIMEOUT_S)
     parser.add_argument("--start-hz", type=float, default=None,
                         help="扫频起点（默认与网页端相同：max(20, SAFE_MIN_FREQ_HZ)）")
     parser.add_argument("--stop-hz", type=float, default=SWEEP_STOP_HZ,
@@ -213,10 +226,18 @@ def main():
 
     sweeps = []
     for k in range(args.repeat):
+        tag = "第 %d/%d 轮" % (k + 1, args.repeat)
+        print("    [扫频] %s 开始 ..." % tag)
         t0 = time.monotonic()
-        sweeps.append(sweep_once(freqs, args.periods))
-        print("      第 %d/%d 次完成，耗时 %.1fs"
-              % (k + 1, args.repeat, time.monotonic() - t0))
+        try:
+            sweep = sweep_once(freqs, args.periods, timeout_s=args.sweep_timeout,
+                               label=tag)
+        except TimeoutError as exc:
+            raise SystemExit("[扫频] 超时中止：%s" % exc)
+        elapsed = time.monotonic() - t0
+        sweeps.append(sweep)
+        print("    [扫频] %s 完成：用时 %.1f s（%d 点，平均 %.1f ms/点）"
+              % (tag, elapsed, len(freqs), elapsed / len(freqs) * 1000.0))
 
     # ---- 2. 复数平均 ----
     print("[3/4] 复数平均 ...")
