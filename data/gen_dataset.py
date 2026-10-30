@@ -65,19 +65,21 @@ HISTORY_PATH = os.path.join(_HERE, "history.csv")
 HISTORY_FIELDS = [
     "timestamp", "sweep_id", "mode", "freq_hz",
     "mag_v_raw", "mag_db_raw", "phase_deg_raw", "phase_valid",
+    "mag_db_cal", "phase_deg_cal", "cal_applied",
 ]
 
 
 def append_history(data, mode="pynq_rtl", path=None, timestamp=None,
                    sweep_id=None):
-    """把一次扫频的 **未校准** 数据追加到 data/history.csv。
+    """把一次网页扫频追加到 data/history.csv（未校准 + 已校准两套值）。
 
-    由 dashboard 的 /api/start_sweep 在每次扫频后调用。只接受未校准数据：
-        freqs
-        mag_v_raw / phase_deg_raw   未校准原始幅值（V/FS）与相位（度）
-        phase_valid                 可选，低信噪比点标记
-    如果缺少原始列，直接报错，绝不把网页上可能已校准的 mag_db/phase_deg
-    写进 history.csv。
+    由 dashboard 的 /api/start_sweep 在每次扫频后调用。写入：
+        mag_v_raw / phase_deg_raw      未校准原始幅值(ADC 码)与相位(度)
+        mag_db_raw                     由未校准幅值换算的 dB
+        mag_db_cal / phase_deg_cal     已校准（查表后）的 dB 与相位
+        cal_applied                    1=当时已应用校准表，0=未校准
+        phase_valid                    低信噪比点标记
+    缺少未校准列直接报错，避免把显示值当成原始值存下来。
     """
     freqs = list(data.get("freqs") or [])
     if not freqs:
@@ -86,6 +88,9 @@ def append_history(data, mode="pynq_rtl", path=None, timestamp=None,
     mags_raw = list(data.get("mag_v_raw") or [])
     phases_raw = list(data.get("phase_deg_raw") or [])
     valid = list(data.get("phase_valid") or [])
+    mags_cal = list(data.get("mag_db") or [])
+    phases_cal = list(data.get("phase_deg") or [])
+    cal_applied = 1 if data.get("calibrated") else 0
     if len(mags_raw) != len(freqs) or len(phases_raw) != len(freqs):
         raise ValueError(
             "history 需要未校准的 mag_v_raw / phase_deg_raw（长度与 freqs 一致），"
@@ -100,6 +105,16 @@ def append_history(data, mode="pynq_rtl", path=None, timestamp=None,
     if parent:
         os.makedirs(parent, exist_ok=True)
     new_file = (not os.path.isfile(path)) or os.path.getsize(path) == 0
+    if not new_file:
+        # 表头变了（例如新增了已校准列）就把旧文件改名归档，避免同一份 CSV
+        # 里混用两种列宽，pandas/DictReader 都会读成错位
+        with open(path, "r", encoding="utf-8-sig", newline="") as fh:
+            old_header = fh.readline().rstrip("\r\n").split(",")
+        if old_header != HISTORY_FIELDS:
+            fallback = path + "." + now.strftime("%Y%m%d-%H%M%S") + ".bak"
+            os.replace(path, fallback)
+            print("history 表头已变更，旧文件归档为 %s" % fallback)
+            new_file = True
 
     with open(path, "a", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
@@ -113,10 +128,16 @@ def append_history(data, mode="pynq_rtl", path=None, timestamp=None,
             mag_db_raw = (20.0 * math.log10(mag_raw)
                           if mag_raw > 0.0 else PLACEHOLDER_MAG_DB)
             is_valid = valid[index] if index < len(valid) else True
+            mag_db_cal = (mags_cal[index] if index < len(mags_cal)
+                          else PLACEHOLDER_MAG_DB)
+            phase_cal = (phases_cal[index] if index < len(phases_cal)
+                         else PLACEHOLDER_PHASE_DEG)
             writer.writerow([
                 ts, sid, mode, "%.6f" % float(freq),
                 "%.9g" % mag_raw, "%.4f" % mag_db_raw,
                 "%.6f" % phase_raw, int(bool(is_valid)),
+                "%.4f" % float(mag_db_cal), "%.6f" % float(phase_cal),
+                cal_applied,
             ])
     return path
 

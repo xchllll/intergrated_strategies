@@ -338,7 +338,8 @@ def start_sweep():
         app.logger.exception("扫频失败")
         return jsonify({"status": "error", "msg": str(exc)}), 500
 
-    # 每次网页扫频都把同一份未校准数据追加到 data/history.csv
+    # 每次网页扫频都把数据追加到 data/history.csv（未校准 + 已校准两套值）
+    data["calibrated"] = bool(calibration.get("calibrated"))
     _history_path, history_error = _record_history(data, source)
 
     ai_result, ai_error = _run_ai(data, source["is_real"], source["mode"])
