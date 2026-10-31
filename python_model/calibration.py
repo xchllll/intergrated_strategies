@@ -98,6 +98,12 @@ CAL_TABLE = []
 CAL_TABLE_DEFAULT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "data", "calibration_table.json")
 
+# 校准开关（终端脚本 board/cal_toggle.sh 写入；热生效，无需重启）
+CAL_MODE_DEFAULT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(CAL_TABLE_DEFAULT_PATH)), "cal_mode.json")
+_CAL_MODE = {}
+_CAL_MODE_STAMP = None
+
 # 四态参考态顺序（与 four_state_calibrate / run_four_state_calibration 一致）
 REF_STATE_NAMES = ("direct_0", "buffer_0", "direct_90", "direct_180")
 
@@ -339,6 +345,36 @@ def reload_input_network(path=None):
         return False
 
 
+def load_cal_mode(path=None):
+    """读 data/cal_mode.json（不存在时视为全部启用），按 (mtime,size) 缓存。
+
+    字段：
+      direct:  是否启用直连校准表
+      buffer:  是否启用缓冲校准表
+      hplane:  是否对直连路径套用 H 平面（输入网络）表
+    """
+    global _CAL_MODE, _CAL_MODE_STAMP
+    path = path or CAL_MODE_DEFAULT_PATH
+    try:
+        st = os.stat(path)
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        _CAL_MODE = {}
+        _CAL_MODE_STAMP = None
+        return _CAL_MODE
+    if stamp == _CAL_MODE_STAMP and _CAL_MODE:
+        return _CAL_MODE
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            _CAL_MODE = json.load(fh) or {}
+        _CAL_MODE_STAMP = stamp
+    except Exception as exc:  # noqa: BLE001
+        _warn_once("cal_mode", "读取 %s 失败（%s），按全部启用处理" % (path, exc))
+        _CAL_MODE = {}
+        _CAL_MODE_STAMP = stamp
+    return _CAL_MODE
+
+
 def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT):
     """查校准表，返回校准后的真实幅值与相位。
 
@@ -347,6 +383,12 @@ def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT):
     表文件存在则自动加载，仍无数据或该路径未标定时返回原值并提示一次。
     返回: (mag_cal, phase_cal)
     """
+    mode = load_cal_mode()
+    if mode.get(path) is False:
+        _warn_once("cal_mode_" + path,
+                   "%s 校准已被 cal_mode.json 禁用，返回原始测量" % path)
+        return mag, phase
+
     if not CAL_TABLE:
         if not ensure_calibration_loaded():
             _warn_once("cal_empty",
@@ -396,7 +438,7 @@ def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT):
                     gain * math.sin(math.radians(off)))
     h_dut = h_meas * h_cal
     # 输入网络表只针对 direct（短接）路径标定；buffer 路径由缓冲器隔离，不套用
-    if path == CAL_PATH_DIRECT:
+    if path == CAL_PATH_DIRECT and mode.get("hplane", True) is not False:
         h_dut = _apply_input_network(h_dut, freq)
     return (abs(h_dut),
             _wrap_180(math.degrees(math.atan2(h_dut.imag, h_dut.real))))

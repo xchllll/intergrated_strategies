@@ -65,7 +65,16 @@ def _calibration_state(calibration_module, cal_path: str = "direct") -> dict:
     """【修复 2】根据当前路径（direct/buffer）如实返回校准状态"""
     try:
         calibration_module.ensure_calibration_loaded()
-        
+        mode = {}
+        if hasattr(calibration_module, "load_cal_mode"):
+            try:
+                mode = calibration_module.load_cal_mode()
+            except Exception:
+                mode = {}
+        if mode.get(cal_path) is False:
+            return {"calibrated": False,
+                    "message": f"{cal_path} 校准已在 cal_mode.json 中禁用"}
+
         # 检查底层表里是否真的存在对应路径的校准数据
         has_path_data = False
         if hasattr(calibration_module, "CAL_TABLE") and calibration_module.CAL_TABLE:
