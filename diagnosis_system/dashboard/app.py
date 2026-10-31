@@ -94,6 +94,7 @@ def _load_demo_csv() -> dict:
                 10.0 ** (mag_db / 20.0) if mag_db > -90.0 else 0.0)
             data["phase_deg_raw"].append(phase)
 
+    data["phase_valid"] = [1 if v > 0 else 0 for v in data["mag_v_raw"]]
     if not data["freqs"]:
         raise ValueError("演示 CSV 为空：%s" % DEMO_CSV)
     return data
@@ -118,11 +119,24 @@ def _ensure_rtl_design():
     _RTL_DESIGN_LOADED = True
 
 
+def _current_dac_volume():
+    """读 CODEC_CORE 里 0x402B(DAC 数字音量) 的值，供校准表元数据比对。"""
+    try:
+        import acceptance
+        for reg, val in getattr(acceptance, "CODEC_CORE", ()):
+            if reg == 0x402B:
+                return val
+    except Exception:  # noqa: BLE001 非板端环境取不到也无所谓
+        pass
+    return None
+
+
 def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     import calibration as cal
     import ps_ctrl
 
     cal.ensure_calibration_loaded()
+    cal.note_driver(dac_volume=_current_dac_volume())
     cal_path_str = "buffer" if use_buffer else "direct"
     cal_status = _calibration_state(cal, cal_path_str) # 使用修复后的状态函数
     
@@ -135,8 +149,14 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     if start_hz > 20.0:
         warnings.append("为避免 48 位累加器在低频溢满量程，板端扫频从 %.1f Hz 开始。" % start_hz)
         
-    for freq in _log_spaced_freqs(start_hz, 20000.0, SWEEP_POINTS):
-        acc_i, acc_q, window_n = ps_ctrl.measure_once(freq, periods=10)
+    freqs = _log_spaced_freqs(start_hz, 20000.0, SWEEP_POINTS)
+    # 每点周期数随频率增加（高频更稳），并按时间预算压缩低频段；
+    # 与 board/calibrate_path.py 共用同一套调度，保证标定与测量条件一致
+    period_list, _pinfo = ps_ctrl.build_period_schedule(
+        freqs, budget_s=ps_ctrl.SWEEP_TIME_BUDGET_S)
+    for index, freq in enumerate(freqs):
+        period = period_list[index]
+        acc_i, acc_q, window_n = ps_ctrl.measure_once(freq, periods=period)
         mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
         mag_cal, phase_cal = cal.apply_calibration(mag, phase, freq, path=cal_path)
         data["freqs"].append(freq)
@@ -145,6 +165,8 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
         data["mag_v_raw"].append(mag)
         data["phase_deg_raw"].append(phase)
 
+    data["phase_valid"] = [1 if cal.phase_is_valid(v) else 0
+                           for v in data["mag_v_raw"]]
     if not data["freqs"]:
         raise RuntimeError("硬件扫频没有返回任何频点")
     return data, cal_status, warnings
@@ -197,6 +219,8 @@ def _run_audio_loopback_sweep() -> tuple[dict, dict, list[str]]:
         data["phase_deg"].append(float(phase))
         data["mag_v_raw"].append(float(magnitude_raw))
         data["phase_deg_raw"].append(float(phase_raw))
+    data["phase_valid"] = [1 if cal.phase_is_valid(v) else 0
+                           for v in data["mag_v_raw"]]
     if not data["freqs"]:
         raise RuntimeError("音频闭环扫频没有得到任何有效频点")
     return data, calibration, warnings
@@ -320,7 +344,8 @@ def start_sweep():
         app.logger.exception("扫频失败")
         return jsonify({"status": "error", "msg": str(exc)}), 500
 
-    # 每次网页扫频都把同一份未校准数据追加到 data/history.csv
+    # 每次网页扫频都把数据追加到 data/history.csv（未校准 + 已校准两套值）
+    data["calibrated"] = bool(calibration.get("calibrated"))
     _history_path, history_error = _record_history(data, source)
 
     ai_result, ai_error = _run_ai(data, source["is_real"], source["mode"])

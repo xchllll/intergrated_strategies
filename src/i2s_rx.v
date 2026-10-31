@@ -6,8 +6,38 @@ module i2s_rx (
     input  wire        i2s_sdata_in,
     output reg signed [15:0] left_data,
     output reg signed [15:0] right_data,
+    output     signed [15:0] mix_data,     // 左右声道相加，供解调使用
     output reg               data_valid
 );
+
+    // ------------------------------------------------------------------
+    // 左右声道相加：mix = saturate(L + R)
+    // 目的：夹具接 Tip 或 Ring 都能测到，不再依赖"解调读哪一路"。
+    // 采用相加而不是平均：实测中通常只有一个声道被驱动，相加不损失 6 dB。
+    // 注意1：两个声道在 I2S 帧里相差半个采样(1/(2*fs))，相加相当于两抽头
+    //        滤波，幅频有 |cos(pi*f/(2*fs))| 的梳状响应（20 kHz 约 -1.9 dB），
+    //        标定与测量走同一条路，会被校准抵消。
+    // 注意2：两路同时有大信号时和会超出 16 位，这里做饱和（削顶而非翻转）。
+    //        因此标定时请用与实际测量相同的夹具（单路驱动），避免削顶。
+    // ------------------------------------------------------------------
+    reg signed [16:0] mix_sum;
+    // 注意：Verilog 里 a+b 的结果宽度取操作数最大值(16位)，两个 16 位数相加
+    // 会先溢出。所以必须先把两边符号扩展到 17 位再相加。
+    wire signed [16:0] left_ext  = {left_data[15],  left_data};
+    wire signed [16:0] right_ext = {right_data[15], right_data};
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            mix_sum <= 17'sd0;
+        else
+            mix_sum <= left_ext + right_ext;
+    end
+
+    // 直接相加（不是平均）：实测中通常只有一个声道被驱动，相加不会损失 6 dB。
+    // 和可能超出 16 位范围，这里做饱和处理（削顶而不是回绕翻转）。
+    wire signed [16:0] mix_sat =
+        (mix_sum > 17'sd32767)  ? 17'sd32767  :
+        (mix_sum < -17'sd32768) ? -17'sd32768 : mix_sum;
+    assign mix_data = mix_sat[15:0];
 
     // Synchronize and detect BCLK rising edges.
     reg bclk_d1, bclk_d2;
