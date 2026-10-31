@@ -35,7 +35,7 @@ module top (
     wire signed [47:0] acc_Q_full;  
     wire signed [15:0] rx_left_data;
     wire signed [15:0] rx_right_data;
-    wire signed [15:0] rx_mix_data;      // (L+R)/2，夹具接 Tip 或 Ring 都能测
+    wire signed [15:0] rx_mix_data;      // L+R（饱和），夹具接 Tip 或 Ring 都能测
     wire               rx_data_valid;
 
     // ------------------------------------------------------------------
@@ -71,7 +71,7 @@ module top (
         
     demod u_demod (
         .clk(clk), .rst_n(sys_rst_n), .en(wire_sweep_en), .clear(wire_sweep_clear), 
-        .adc_in(rx_mix_data),  // 左右声道平均：夹具接 Tip 或 Ring 都能测
+        .adc_in(rx_mix_data),  // 左右声道相加（饱和）：夹具接 Tip 或 Ring 都能测
         .ref_cos(wire_dds_cosine), .ref_sin(-wire_dds_sine), 
         .acc_I(acc_I_full), .acc_Q(acc_Q_full)  
     );
