@@ -26,6 +26,7 @@ _TABLE = None
 _F = None
 _LEVELS = None
 _LEVEL_F = None
+_H = None
 _Z = None
 _L = None
 _RREF = None
@@ -33,7 +34,7 @@ _RREF = None
 
 def load(path=None):
     """加载 input_network.json；path=None 时在模块旁和 ../data 下查找。"""
-    global _TABLE, _F, _LEVELS, _LEVEL_F, _Z, _L, _RREF
+    global _TABLE, _F, _LEVELS, _LEVEL_F, _H, _Z, _L, _RREF
     if path is None:
         here = os.path.dirname(os.path.abspath(__file__))
         for cand in (os.path.join(here, "input_network.json"),
@@ -49,6 +50,8 @@ def load(path=None):
     _F = np.asarray(d["freqs"], float)
     _LEVELS = np.asarray(d["levels"], float)
     _LEVEL_F = (np.asarray(d["level_f"], float) if d.get("level_f") else None)
+    _H = ((np.asarray(d["h_re"], float) + 1j * np.asarray(d["h_im"], float))
+          if d.get("h_re") else None)
     _Z = (np.asarray(d["zin_re"], float) + 1j * np.asarray(d["zin_im"], float))
     _L = np.asarray(d["L_re"], float) + 1j * np.asarray(d["L_im"], float)
     _RREF = float(d.get("R_ref", 10900.0))
@@ -60,14 +63,36 @@ def _ensure():
         load()
 
 
-def zin_at(freq, level):
-    """按频率和输入电平 u=|H_cal| 插值输入阻抗。
+def zin_at(freq, level_or_h):
+    """按频率和测量点插值输入阻抗。
 
-    优先用 level_f（逐频点的真实电平）；旧表没有该字段时退回 levels 中位电平。
+    新表（format 3）存了每条标定曲线的复数 H（h_re/h_im）。此时用
+    **H 平面反距离加权**：在 (Re H, Im H) 平面上找与当前测量点最接近的
+    标定行，而不是只按 |H| 插值。这样同一电平下相位不同的 DUT（纯电阻
+    vs 容性 RC）会各自取到正确的 Zin，避免 6.6-6.9 kHz 那种“电平交叉”
+    造成的假陷波。
+    旧表没有 h_re/h_im 时退回原来的 |H| 一维插值。
     """
     _ensure()
     lf = np.log(max(freq, 1e-9))
     ltab = np.log(_F)
+    if _H is not None:
+        h = complex(level_or_h)
+        hs, zs = [], []
+        for i in range(_Z.shape[0]):
+            hr = float(np.interp(lf, ltab, _H[i].real))
+            hi = float(np.interp(lf, ltab, _H[i].imag))
+            zr = float(np.interp(lf, ltab, _Z[i].real))
+            zi = float(np.interp(lf, ltab, _Z[i].imag))
+            hs.append(complex(hr, hi))
+            zs.append(complex(zr, zi))
+        hs = np.array(hs)
+        zs = np.array(zs)
+        d2 = np.abs(h - hs) ** 2
+        w = 1.0 / (d2 + 1e-6)
+        return complex(np.sum(w * zs) / np.sum(w))
+
+    level = abs(level_or_h)
     if _LEVEL_F is not None:
         us, zs = [], []
         for i in range(_Z.shape[0]):
@@ -118,7 +143,7 @@ def deembed_complex(h_cal, freq, use_crosstalk=False):
     A = h * (1 + L) - L
     if abs(A) < 1e-9:
         return 0j
-    zin = zin_at(freq, abs(h))
+    zin = zin_at(freq, h)
     z_dut = zin * (1 - A) / A
     if abs(z_dut) > 1e12:
         return 0j
