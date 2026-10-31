@@ -14,6 +14,11 @@ os.environ.setdefault("XILINX_XRT", "/usr")
 
 from flask import Flask, jsonify, render_template, request
 
+try:  # 启机短接参考扫频（可选模块；没有时不影响原功能）
+    import startup_reference
+except Exception:  # pragma: no cover
+    startup_reference = None
+
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "board"))
@@ -270,12 +275,19 @@ def status():
         calibration = _calibration_state(cal, req_cal_path)
     except Exception as exc:
         calibration = {"calibrated": False, "message": str(exc)}
+    reference = {"running": False, "done": False, "error": None, "message": ""}
+    if startup_reference is not None:
+        try:
+            reference = startup_reference.status()
+        except Exception:
+            pass
     return jsonify(
         {
             "status": "success",
             "source": source,
             "calibration": calibration,
             "points": (AUDIO_SWEEP_POINTS if source["mode"] == "pynq_audio_loopback" else SWEEP_POINTS),
+            "reference": reference,
         }
     )
 
@@ -315,6 +327,9 @@ def _record_history(data, source):
 
 @app.route("/api/start_sweep", methods=["POST"])
 def start_sweep():
+    if startup_reference is not None and startup_reference.is_running():
+        return jsonify({"status": "busy",
+                        "msg": "正在进行相位对齐，请等待参考扫频完成后再试"}), 409
     payload = request.get_json(silent=True) or {}
     
     # 【修复 1】严格白名单校验

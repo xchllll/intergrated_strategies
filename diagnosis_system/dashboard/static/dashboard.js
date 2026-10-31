@@ -13,6 +13,7 @@ async function loadStatus() {
         const result = await response.json();
         if (result.status === 'success') {
             applyStatus(result.source, result.calibration);
+            applyReferenceStatus(result.reference);
         }
     } catch (error) {
         setNotice('无法读取后端状态：' + error.message, true);
@@ -28,6 +29,9 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('buffer-toggle').addEventListener('change', () => {
         loadStatus();
     });
+
+    // 启动短接参考扫频期间轮询状态：禁用“开始扫频测量”并提示
+    setInterval(loadStatus, 2000);
 });
 
 function applyStatus(source, calibration) {
@@ -53,9 +57,37 @@ function applyStatus(source, calibration) {
     document.getElementById('calibration-detail').textContent = calibration.message || '状态未知';
 }
 
+function applyReferenceStatus(reference) {
+    window.__lastReference = reference || {};
+    const button = document.getElementById('start-btn');
+    if (!button) return;
+    if (reference && reference.running) {
+        button.disabled = true;
+        button.textContent = '正在进行相位对齐...';
+        button.title = reference.message || '短接参考扫频进行中';
+        setNotice(reference.message || '正在进行相位对齐（短接参考扫频），请稍候...', false);
+        return;
+    }
+    if (button.textContent === '正在进行相位对齐...') {
+        button.disabled = false;
+        button.textContent = '开始扫频测量';
+        button.title = '';
+        if (reference && reference.error) {
+            setNotice('相位对齐失败：' + reference.error + '（仍使用旧校准表）', true);
+        } else if (reference && reference.done) {
+            setNotice('相位对齐完成，可以开始扫频。', false);
+        }
+    }
+}
+
 async function startSweep() {
     const button = document.getElementById('start-btn');
     const bufferEnabled = document.getElementById('buffer-toggle').checked;
+
+    if (window.__lastReference && window.__lastReference.running) {
+        setNotice('正在进行相位对齐，请稍候...', false);
+        return;
+    }
 
     button.disabled = true;
     button.textContent = '扫频中...';
