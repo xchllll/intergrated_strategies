@@ -107,8 +107,10 @@ def deembed_complex(h_cal, freq, use_crosstalk=False):
     """输入: 短接校准后的复数 H；输出: 重新嵌入恒定 R_ref 后的复数 H。"""
     _ensure()
     h = complex(h_cal)
-    # 极低阻/短接：|H|≈1，去嵌入只会放大噪声，直接返回
-    if abs(h) > 0.99:
+    # 极低阻/短接：|H|≈1，去嵌入只会放大噪声，直接返回。
+    # 0.999 仍能保护真正的短接（|H|=1.000），但让 |H|=0.99~0.999 的近短路
+    # 容性/感性 DUT（例如高频段的 10 nF）也能走校正。
+    if abs(h) > 0.999:
         return h
     if abs(h) < 1e-5:
         return 0j
