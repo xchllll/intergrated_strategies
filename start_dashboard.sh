@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # 鍚姩渚挎惡寮忕數瀛愮數璺櫤鑳借瘖鏂郴缁熺綉椤?# PYNQ 3.1 闇€瑕?root + XILINX_XRT锛屼笖 XILINX_XRT 蹇呴』鍦?import pynq 涔嬪墠鐢熸晥
 set -u
 cd /home/xilinx/jupyter_notebooks/project || exit 1
@@ -17,7 +17,7 @@ if sudo ss -ltnp 2>/dev/null | grep -q ':5000 '; then
 fi
 
 # 3) root + XILINX_XRT 蹇呴』鍦?import pynq 涔嬪墠鐢熸晥
-sudo env XILINX_XRT=/usr START_WITH_REFERENCE="${START_WITH_REFERENCE:-0}" \
+sudo env XILINX_XRT=/usr START_WITH_REFERENCE="${START_WITH_REFERENCE:-1}" \
      /usr/local/share/pynq-venv/bin/python3 run_dashboard.py \
      > /tmp/dashboard.log 2>&1 < /dev/null &
 
