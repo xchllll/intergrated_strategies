@@ -6,8 +6,29 @@ module i2s_rx (
     input  wire        i2s_sdata_in,
     output reg signed [15:0] left_data,
     output reg signed [15:0] right_data,
+    output     signed [15:0] mix_data,     // 左右声道平均，供解调使用
     output reg               data_valid
 );
+
+    // ------------------------------------------------------------------
+    // 左右声道平均：(L+R)>>>1
+    // 目的：夹具接 Tip 或 Ring 都能测到，不再依赖"解调读哪一路"。
+    // 注意：两个声道在 I2S 帧里相差半个采样(1/(2*fs))，所以这相当于一个
+    //       两抽头平均滤波，幅频有 |cos(pi*f/(2*fs))| 的梳状响应
+    //       （20 kHz 处约 -1.9 dB）。标定与测量走同一条路，会被校准抵消。
+    // ------------------------------------------------------------------
+    reg signed [16:0] mix_sum;
+    // 注意：Verilog 里 a+b 的结果宽度取操作数最大值(16位)，两个 16 位数相加
+    // 会先溢出。所以必须先把两边符号扩展到 17 位再相加。
+    wire signed [16:0] left_ext  = {left_data[15],  left_data};
+    wire signed [16:0] right_ext = {right_data[15], right_data};
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            mix_sum <= 17'sd0;
+        else
+            mix_sum <= left_ext + right_ext;
+    end
+    assign mix_data = mix_sum >>> 1;
 
     // Synchronize and detect BCLK rising edges.
     reg bclk_d1, bclk_d2;

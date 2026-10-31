@@ -35,6 +35,7 @@ module top (
     wire signed [47:0] acc_Q_full;  
     wire signed [15:0] rx_left_data;
     wire signed [15:0] rx_right_data;
+    wire signed [15:0] rx_mix_data;      // (L+R)/2，夹具接 Tip 或 Ring 都能测
     wire               rx_data_valid;
 
     // ------------------------------------------------------------------
@@ -64,12 +65,13 @@ module top (
     i2s_rx u_i2s_rx (
             .clk(clk), .rst_n(sys_rst_n), // 用内部复位
             .i2s_bclk(i2s_bclk), .i2s_lrclk(i2s_lrclk), .i2s_sdata_in(i2s_sdata_in),
-            .left_data(rx_left_data), .right_data(rx_right_data), .data_valid(rx_data_valid)
+            .left_data(rx_left_data), .right_data(rx_right_data),
+            .mix_data(rx_mix_data), .data_valid(rx_data_valid)
         );
         
     demod u_demod (
         .clk(clk), .rst_n(sys_rst_n), .en(wire_sweep_en), .clear(wire_sweep_clear), 
-        .adc_in(rx_left_data), // ★ 改：用真实的左声道数据输入！而不是自环了！
+        .adc_in(rx_mix_data),  // 左右声道平均：夹具接 Tip 或 Ring 都能测
         .ref_cos(wire_dds_cosine), .ref_sin(-wire_dds_sine), 
         .acc_I(acc_I_full), .acc_Q(acc_Q_full)  
     );
