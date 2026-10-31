@@ -288,6 +288,57 @@ def ensure_calibration_loaded(path=None):
     return bool(CAL_TABLE)
 
 
+# ---------------------------------------------------------------------------
+# 输入端频变阻抗去嵌入（v1）
+# ---------------------------------------------------------------------------
+_INPUT_NETWORK = None
+_INPUT_NETWORK_FAILED = False
+
+
+def _apply_input_network(h_dut, freq):
+    """把 codec 输入端的频变阻抗从测量中扣掉，再以恒定 R_ref 重新嵌入。
+
+    输入: 已做短接校准的复数 H；输出: 去嵌入后的复数 H。
+    表文件缺失/损坏时静默回退到短接校准值，只告警一次。
+    """
+    global _INPUT_NETWORK, _INPUT_NETWORK_FAILED
+    if _INPUT_NETWORK_FAILED:
+        return h_dut
+    if _INPUT_NETWORK is None:
+        try:
+            import input_network as mod
+            mod.load()
+            _INPUT_NETWORK = mod
+        except Exception as exc:  # noqa: BLE001 不阻断测量
+            _INPUT_NETWORK_FAILED = True
+            _warn_once("input_network",
+                       "输入网络去嵌入不可用（%s），本次返回短接校准值" % exc)
+            return h_dut
+    try:
+        return _INPUT_NETWORK.deembed_complex(h_dut, freq)
+    except Exception as exc:  # noqa: BLE001
+        _warn_once("input_network_run",
+                   "输入网络去嵌入失败（%s），本次返回短接校准值" % exc)
+        return h_dut
+
+
+def reload_input_network(path=None):
+    """重新加载 input_network.json（换夹具/换增益档后调用）。"""
+    global _INPUT_NETWORK, _INPUT_NETWORK_FAILED
+    _INPUT_NETWORK = None
+    _INPUT_NETWORK_FAILED = False
+    try:
+        import input_network as mod
+        mod.load(path)
+        _INPUT_NETWORK = mod
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _INPUT_NETWORK_FAILED = True
+        _warn_once("input_network_reload",
+                   "重新加载输入网络表失败（%s）" % exc)
+        return False
+
+
 def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT):
     """查校准表，返回校准后的真实幅值与相位。
 
@@ -344,6 +395,9 @@ def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT):
     h_cal = complex(gain * math.cos(math.radians(off)),
                     gain * math.sin(math.radians(off)))
     h_dut = h_meas * h_cal
+    # 输入网络表只针对 direct（短接）路径标定；buffer 路径由缓冲器隔离，不套用
+    if path == CAL_PATH_DIRECT:
+        h_dut = _apply_input_network(h_dut, freq)
     return (abs(h_dut),
             _wrap_180(math.degrees(math.atan2(h_dut.imag, h_dut.real))))
 
