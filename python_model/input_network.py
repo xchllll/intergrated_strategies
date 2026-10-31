@@ -30,11 +30,12 @@ _H = None
 _Z = None
 _L = None
 _RREF = None
+_SHORT_REF = None
 
 
 def load(path=None):
     """加载 input_network.json；path=None 时在模块旁和 ../data 下查找。"""
-    global _TABLE, _F, _LEVELS, _LEVEL_F, _H, _Z, _L, _RREF
+    global _TABLE, _F, _LEVELS, _LEVEL_F, _H, _Z, _L, _RREF, _SHORT_REF
     if path is None:
         here = os.path.dirname(os.path.abspath(__file__))
         for cand in (os.path.join(here, "input_network.json"),
@@ -55,6 +56,11 @@ def load(path=None):
     _Z = (np.asarray(d["zin_re"], float) + 1j * np.asarray(d["zin_im"], float))
     _L = np.asarray(d["L_re"], float) + 1j * np.asarray(d["L_im"], float)
     _RREF = float(d.get("R_ref", 10900.0))
+    _SHORT_REF = None
+    sr = d.get("short_ref")
+    if sr and sr.get("mag_gain"):
+        _SHORT_REF = (np.asarray(sr["mag_gain"], float),
+                      np.asarray(sr["phase_offset_deg"], float))
     return d
 
 
@@ -156,6 +162,58 @@ def deembed(mag, phase_deg, freq, use_crosstalk=False):
                       math.sin(math.radians(phase_deg)))
     hd = deembed_complex(h, freq, use_crosstalk=use_crosstalk)
     return abs(hd), math.degrees(math.atan2(hd.imag, hd.real))
+
+
+def apply_short_change(short_cur):
+    """把 H 平面表从建表短接 S_ref 旋转到当前进程的短接 S_cur。
+
+    short_cur 是 calibration.CAL_TABLE 风格的 rows（含 freq 与 direct 的
+    mag_gain/phase_offset_deg）。返回 True 表示已旋转。
+
+    H_new = H_old * S_cur/S_ref
+    Z_dut = Z_old*(1-H_old)/H_old
+    Z_new = H_new*Z_dut/(1-H_new)
+    """
+    global _H, _Z, _LEVEL_F, _LEVELS, _RREF
+    _ensure()
+    if _SHORT_REF is None or _H is None:
+        return False
+    gref, oref = _SHORT_REF
+    cur = {}
+    for row in short_cur:
+        e = row.get("direct") or {}
+        g = e.get("mag_gain")
+        p = e.get("phase_offset_deg")
+        if g and p is not None:
+            cur[round(float(row["freq"]), 6)] = (float(g), float(p))
+    try:
+        gcur = np.array([cur[round(float(f), 6)][0] for f in _F])
+        ocur = np.array([cur[round(float(f), 6)][1] for f in _F])
+    except KeyError:
+        return False
+    ratio = (gcur / gref) * np.exp(1j * np.deg2rad(ocur - oref))
+    Hn = _H * ratio[None, :]
+    Zd = _Z * (1 - _H) / _H
+    Zn = Hn * Zd / (1 - Hn)
+    _H = Hn
+    _Z = Zn
+    _LEVEL_F = np.abs(Hn)
+    _LEVELS = np.median(_LEVEL_F, axis=1)
+    try:
+        names = (_TABLE.get("meta") or {}).get("rows") or []
+        idx = names.index("97k2")
+        lf = _F < 100
+        _RREF = float(np.median(Zn[idx][lf].real))
+    except (ValueError, IndexError):
+        pass
+    _TABLE["h_re"] = [[float(v) for v in row.real] for row in Hn]
+    _TABLE["h_im"] = [[float(v) for v in row.imag] for row in Hn]
+    _TABLE["zin_re"] = [[float(v) for v in row.real] for row in Zn]
+    _TABLE["zin_im"] = [[float(v) for v in row.imag] for row in Zn]
+    _TABLE["level_f"] = [[float(v) for v in row] for row in _LEVEL_F]
+    _TABLE["levels"] = [float(v) for v in _LEVELS]
+    _TABLE["R_ref"] = _RREF
+    return True
 
 
 def parameters():
