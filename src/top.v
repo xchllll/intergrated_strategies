@@ -184,11 +184,11 @@ module top (
     always @(posedge clk) begin
         if (!sys_rst_n)
             mclk_div <= 4'd0;
-        else if (mclk_div == 4'd9)
+        else if (mclk_div == 4'd3)
             mclk_div <= 4'd0;
         else
             mclk_div <= mclk_div + 1'b1;
     end
-    assign au_mclk = (mclk_div < 4'd5);
+    assign au_mclk = (mclk_div < 4'd2);
 
 endmodule

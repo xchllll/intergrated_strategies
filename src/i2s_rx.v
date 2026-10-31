@@ -55,7 +55,7 @@ module i2s_rx (
                 if (bit_cnt == 5'd16) begin
                     // At this edge the delay bit has shifted out and all 16
                     // sample bits are present in candidate.
-                    if (i2s_lrclk) begin
+                    if (!i2s_lrclk) begin
                         left_data  <= candidate;
                         data_valid <= 1'b1;
                     end else begin

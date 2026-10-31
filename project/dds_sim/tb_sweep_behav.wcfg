@@ -3,38 +3,40 @@
    <wave_state>
    </wave_state>
    <db_ref_list>
-      <db_ref path="tb_dds_behav.wdb" id="1">
+      <db_ref path="tb_i2s_tx_behav.wdb" id="1">
          <top_modules>
             <top_module name="glbl" />
-            <top_module name="tb_dds" />
+            <top_module name="tb_i2s_tx" />
          </top_modules>
       </db_ref>
    </db_ref_list>
    <zoom_setting>
-      <ZoomStartTime time="1,977.796158 us"></ZoomStartTime>
-      <ZoomEndTime time="2,015.588652 us"></ZoomEndTime>
-      <Cursor1Time time="1,872.165000 us"></Cursor1Time>
+      <ZoomStartTime time="0.000000 us"></ZoomStartTime>
+      <ZoomEndTime time="3.940001 us"></ZoomEndTime>
+      <Cursor1Time time="0.900000 us"></Cursor1Time>
    </zoom_setting>
    <column_width_setting>
       <NameColumnWidth column_width="469"></NameColumnWidth>
-      <ValueColumnWidth column_width="196"></ValueColumnWidth>
+      <ValueColumnWidth column_width="189"></ValueColumnWidth>
    </column_width_setting>
-   <WVObjectSize size="2" />
+   <WVObjectSize size="4" />
    <wave_markers>
       <marker time="0" label="" />
    </wave_markers>
-   <wvobject fp_name="/tb_dds/sine" type="array">
-      <obj_property name="ElementShortName">sine[15:0]</obj_property>
-      <obj_property name="ObjectShortName">sine[15:0]</obj_property>
-      <obj_property name="WaveformStyle">STYLE_ANALOG</obj_property>
-      <obj_property name="CellHeight">100</obj_property>
-      <obj_property name="Radix">SIGNEDDECRADIX</obj_property>
+   <wvobject fp_name="/tb_i2s_tx/clk" type="logic">
+      <obj_property name="ElementShortName">clk</obj_property>
+      <obj_property name="ObjectShortName">clk</obj_property>
    </wvobject>
-   <wvobject fp_name="/tb_dds/cosine" type="array">
-      <obj_property name="ElementShortName">cosine[15:0]</obj_property>
-      <obj_property name="ObjectShortName">cosine[15:0]</obj_property>
-      <obj_property name="WaveformStyle">STYLE_ANALOG</obj_property>
-      <obj_property name="CellHeight">100</obj_property>
-      <obj_property name="Radix">SIGNEDDECRADIX</obj_property>
+   <wvobject fp_name="/tb_i2s_tx/bclk" type="logic">
+      <obj_property name="ElementShortName">bclk</obj_property>
+      <obj_property name="ObjectShortName">bclk</obj_property>
+   </wvobject>
+   <wvobject fp_name="/tb_i2s_tx/lrclk" type="logic">
+      <obj_property name="ElementShortName">lrclk</obj_property>
+      <obj_property name="ObjectShortName">lrclk</obj_property>
+   </wvobject>
+   <wvobject fp_name="/tb_i2s_tx/sdata" type="logic">
+      <obj_property name="ElementShortName">sdata</obj_property>
+      <obj_property name="ObjectShortName">sdata</obj_property>
    </wvobject>
 </wave_config>
