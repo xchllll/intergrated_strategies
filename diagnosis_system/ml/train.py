@@ -2,6 +2,7 @@ import sys
 import os
 import argparse
 import csv
+import glob
 from pathlib import Path
 import numpy as np
 import joblib
@@ -54,6 +55,63 @@ def load_real_csv(filepath):
     feats = extract_features(freqs, mags, phases)
     return to_vector(feats).reshape(1, -1)
 
+
+def load_real_dataset(root):
+    """读取 data/real/*.csv 下的真实采集数据，返回 (X, y, stats, skipped)。
+
+    支持两种文件格式：
+      * 长表（tools/collect_dut.py）：含 curve_id 列，一条曲线占连续多行
+      * 宽表（data/gen_dataset.py）：freq,mag,phase,label，一个文件一条曲线
+
+    幅值 <= -90 dB 的占位点会被丢弃；有效点少于 40 个的曲线整条跳过，
+    避免残缺曲线污染训练集。
+    """
+    X, y = [], []
+    stats = {}
+    skipped = 0
+
+    for path in sorted(glob.glob(os.path.join(root, "*.csv"))):
+        with open(path, "r", encoding="utf-8-sig", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        if not rows:
+            continue
+
+        if "curve_id" in rows[0]:
+            groups = {}
+            for row in rows:
+                groups.setdefault(row.get("curve_id") or "unknown", []).append(row)
+            curves = list(groups.items())
+        else:
+            curves = [(os.path.splitext(os.path.basename(path))[0], rows)]
+
+        for _cid, curve_rows in curves:
+            freqs, mags, phases = [], [], []
+            for row in curve_rows:
+                try:
+                    mag = float(row["mag"])
+                    freq = float(row["freq"])
+                    phase = float(row["phase"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if mag <= -90.0:          # -99 dB 占位点 / 无效点
+                    continue
+                freqs.append(freq)
+                mags.append(mag)
+                phases.append(phase)
+
+            if len(freqs) < 40:
+                skipped += 1
+                continue
+
+            label = curve_rows[0].get("label") or os.path.splitext(os.path.basename(path))[0]
+            feats = extract_features(freqs, mags, phases)
+            X.append(to_vector(feats))
+            y.append(label)
+            stats[label] = stats.get(label, 0) + 1
+
+    return np.array(X), np.array(y), stats, skipped
+
+
 def main():
     parser = argparse.ArgumentParser(description="电路拓扑识别模型训练")
     default_csv = ROOT_DIR / "data" / "dataset_rc_lpf.csv"
@@ -63,18 +121,36 @@ def main():
     # 【P0-1 修复】增加显式声明开关，不加这个开关，坚决不认它是“实测”
     parser.add_argument("--real", action="store_true", 
                         help="显式声明此 CSV 为真实硬件实测数据。如果不加，一律按 dry-run 仿真处理。")
+    parser.add_argument("--real-dir", type=str, default=None,
+                        help="用该目录下的真实采集数据训练（每条曲线一个样本）；"
+                             "不给则该参数时仍用合成数据训练")
     args = parser.parse_args()
 
-    print("1. 正在生成合成数据并提取特征...")
-    X, y = [], []
-    for sweep_dict, label in build_sweeps(n_per_class=50):
-        feats = extract_features(sweep_dict["freqs"], sweep_dict["mag_db"], sweep_dict["phase_deg"])
-        X.append(to_vector(feats))
-        y.append(label)
-        
-    X = np.array(X)
-    y = np.array(y)
-    print(f"   训练集生成完毕！共 {X.shape[0]} 个合成样本，{X.shape[1]} 个特征。")
+    if args.real_dir:
+        print("1. 正在读取真实采集数据：%s" % args.real_dir)
+        X, y, stats, skipped = load_real_dataset(args.real_dir)
+        if len(X) == 0:
+            raise SystemExit("真实数据为空：%s（先跑 tools/collect_dut.py）" % args.real_dir)
+        print("   共 %d 条曲线（跳过 %d 条有效点不足的），%d 个特征"
+              % (len(X), skipped, X.shape[1]))
+        for label in sorted(stats):
+            print("     %-16s %d 条" % (label, stats[label]))
+        if min(stats.values()) < 2:
+            raise SystemExit("有类别样本数 < 2，无法做分层划分；请每类至少采 2 条")
+        train_source = "real"
+    else:
+        print("1. 正在生成合成数据并提取特征...")
+        X, y = [], []
+        for sweep_dict, label in build_sweeps(n_per_class=50):
+            feats = extract_features(sweep_dict["freqs"], sweep_dict["mag_db"], sweep_dict["phase_deg"])
+            X.append(to_vector(feats))
+            y.append(label)
+
+        X = np.array(X)
+        y = np.array(y)
+        print(f"   训练集生成完毕！共 {X.shape[0]} 个合成样本，{X.shape[1]} 个特征。")
+        stats = {}
+        train_source = "synthetic"
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
@@ -102,7 +178,9 @@ def main():
     mlp_acc = accuracy_score(y_test, mlp_preds)
     
     print(f"   神经网络测试集准确率: {mlp_acc * 100:.2f}%")
-    print(classification_report(y_test, mlp_preds, target_names=list(CLASSES.values())))
+    _labels = sorted(set(y_test) | set(mlp_preds))
+    print(classification_report(y_test, mlp_preds, labels=_labels,
+                                target_names=[CLASSES.get(c, c) for c in _labels]))
     joblib.dump(mlp_pipeline, model_dir / "topo_mlp.joblib")
 
     # ===== 导出与库版本无关的 JSON（PYNQ 板子用 numpy 推理，不需要 sklearn）=====
@@ -117,11 +195,12 @@ def main():
 
     # ----------------- 生成混淆矩阵 -----------------
     print("\n4. 正在生成混淆矩阵图...")
-    cm = confusion_matrix(y_test, mlp_preds)
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[CLASSES[c] for c in np.unique(y_test)])
+    cm = confusion_matrix(y_test, mlp_preds, labels=_labels)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm,
+                                  display_labels=[CLASSES.get(c, c) for c in _labels])
     fig, ax = plt.subplots(figsize=(8, 6))
     disp.plot(cmap=plt.cm.Blues, ax=ax)
-    plt.title("MLP Confusion Matrix (Synthetic Data)")
+    plt.title("MLP Confusion Matrix (%s)" % ("Real Data" if train_source == "real" else "Synthetic Data"))
     plt.savefig(report_dir / "confusion_matrix.png", bbox_inches='tight')
     plt.close()
 
@@ -130,7 +209,11 @@ def main():
     is_dry_run = True
     real_test_result = "未找到 CSV 文件。"
 
-    if os.path.exists(args.real_csv):
+    if train_source == "real":
+        # 训练集本身就是实测数据，再拿 --real-csv 做"域外测试"没有意义
+        real_test_result = ("本次训练集为真实采集数据，未执行额外的域外测试；"
+                            "模型泛化能力请看上面的测试集指标。")
+    elif os.path.exists(args.real_csv):
         if not args.real:
             # 文件存在，但没加 --real 开关
             real_test_result = f"文件 `{Path(args.real_csv).name}` 存在，但**未提供 `--real` 开关**。系统默认判定为合成/仿真数据（dry-run），不宣称实测结果。"
@@ -160,19 +243,31 @@ def main():
     report_path = report_dir / "ml_training_note.md"
     with open(report_path, "w", encoding="utf-8") as f:
         # 【P0-1 修复】只有显式 --real 通过后，标题才叫实测检验
-        title_type = "实测检验" if not is_dry_run else "dry-run 仿真（合成自检）"
+        if train_source == "real":
+            title_type = "实测数据训练"
+        else:
+            title_type = "实测检验" if not is_dry_run else "dry-run 仿真（合成自检）"
         f.write(f"# ML 训练报告 ({title_type})\n\n")
         
         f.write("## 1. 数据来源与训练策略\n")
-        f.write("- **训练集**: 100% 纯合成数据 (通过 `gen_mock.py` 物理公式生成)。\n")
-        f.write("- **测试集**: 从合成数据中划分的 20% 数据。\n")
-        f.write("- **域外测试 (OOD)**: 必须显式传入 `--real` 且文件存在，才认定为真实硬件采集的 CSV，防止用仿真数据伪造实测。\n\n")
+        if train_source == "real":
+            dist = "、".join("%s %d 条" % (k, v) for k, v in sorted(stats.items()))
+            f.write("- **训练集**: 真实硬件采集，共 %d 条曲线（%s）。\n" % (len(X), dist))
+            f.write("- **划分**: 每条曲线一个样本，按类别分层抽取 20% 作为测试集。\n")
+            f.write("- **数据来源**: `tools/collect_dut.py` 通过网页后端采集，"
+                    "已应用校准表与输入网络去嵌入。\n\n")
+        else:
+            f.write("- **训练集**: 100% 纯合成数据 (通过 `gen_mock.py` 物理公式生成)。\n")
+            f.write("- **测试集**: 从合成数据中划分的 20% 数据。\n")
+            f.write("- **域外测试 (OOD)**: 必须显式传入 `--real` 且文件存在，"
+                    "才认定为真实硬件采集的 CSV，防止用仿真数据伪造实测。\n\n")
         
-        f.write("## 2. 模型性能 (基于合成数据)\n")
+        f.write("## 2. 模型性能 (%s)\n" % ("实测数据" if train_source == "real" else "基于合成数据"))
         f.write(f"- **决策树 (DT) 准确率**: {dt_acc * 100:.2f}%\n")
         f.write(f"- **神经网络 (MLP) 准确率**: {mlp_acc * 100:.2f}%\n")
         
-        f.write("> *注：由于训练集和测试集均来自高度理想的合成数据，模型极易达到极高准确率。该数字仅反映算法在合成数据上的可分性，不代表真实硬件环境下的泛化表现。真实表现请参考下文的域外测试结果。*\n\n")
+        if train_source != "real":
+            f.write("> *注：由于训练集和测试集均来自高度理想的合成数据，模型极易达到极高准确率。该数字仅反映算法在合成数据上的可分性，不代表真实硬件环境下的泛化表现。真实表现请参考下文的域外测试结果。*\n\n")
         
         f.write("### 混淆矩阵\n")
         f.write("![Confusion Matrix](./confusion_matrix.png)\n\n")
@@ -181,7 +276,7 @@ def main():
         f.write(real_test_result + "\n")
         
     print(f"\n 训练与评估完成！报告已保存至 {report_path}")
-    if is_dry_run:
+    if train_source == "synthetic" and is_dry_run:
         print(" 当前为 dry-run 仿真测试，若要声明为真实实测，请添加 --real 参数。")
 
 if __name__ == "__main__":

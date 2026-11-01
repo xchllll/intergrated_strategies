@@ -5,8 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // 1. 修改 loadStatus，支持传参
 async function loadStatus() {
-    const isBufferOn = document.getElementById('buffer-toggle').checked;
-    const calPath = isBufferOn ? 'buffer' : 'direct';
+    const calPath = 'direct';   // 有源运放方案已放弃，固定走直连校准
     
     try {
         const response = await fetch(`/api/status?cal_path=${calPath}`);
@@ -20,17 +19,8 @@ async function loadStatus() {
     }
 }
 
-// 2. 在 DOMContentLoaded 里面，给开关加个监听事件 (加到 document.addEventListener 里面)
+// 启动短接参考扫频期间轮询状态：禁用“开始扫频测量”并提示
 document.addEventListener('DOMContentLoaded', () => {
-    drawBode([], [], [], 'demo_csv');
-    loadStatus();
-    
-    // 【P2 修复】每次拨动开关，立刻重新拉取校准状态
-    document.getElementById('buffer-toggle').addEventListener('change', () => {
-        loadStatus();
-    });
-
-    // 启动短接参考扫频期间轮询状态：禁用“开始扫频测量”并提示
     setInterval(loadStatus, 2000);
 });
 
@@ -105,7 +95,6 @@ async function startReference() {
 
 async function startSweep() {
     const button = document.getElementById('start-btn');
-    const bufferEnabled = document.getElementById('buffer-toggle').checked;
 
     if (window.__lastReference && window.__lastReference.running) {
         setNotice('正在进行相位对齐，请稍候...', false);
@@ -122,7 +111,7 @@ async function startSweep() {
         // A2: 模式拆分，默认请求 rtl 自研模式
         const payload = {
             mode: "rtl", 
-            cal_path: bufferEnabled ? "buffer" : "direct"
+            cal_path: "direct"
         };
 
         const response = await fetch('/api/start_sweep', {
