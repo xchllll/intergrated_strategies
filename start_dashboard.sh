@@ -17,7 +17,7 @@ if sudo ss -ltnp 2>/dev/null | grep -q ':5000 '; then
 fi
 
 # 3) root + XILINX_XRT 蹇呴』鍦?import pynq 涔嬪墠鐢熸晥
-sudo env XILINX_XRT=/usr START_WITH_REFERENCE="${START_WITH_REFERENCE:-1}" \
+sudo env XILINX_XRT=/usr \
      /usr/local/share/pynq-venv/bin/python3 run_dashboard.py \
      > /tmp/dashboard.log 2>&1 < /dev/null &
 

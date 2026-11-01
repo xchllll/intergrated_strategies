@@ -5,6 +5,7 @@ import math
 import os
 import platform
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -299,6 +300,23 @@ def status():
             "reference": reference,
         }
     )
+
+
+def _run_reference_bg():
+    try:
+        startup_reference.run(repeat=1, design_loaded=True)
+    except Exception:
+        app.logger.exception("参考扫频失败")
+
+
+@app.route("/api/start_reference", methods=["POST"])
+def api_start_reference():
+    if startup_reference is None:
+        return jsonify({"status": "error", "msg": "参考扫频模块不可用"}), 500
+    if startup_reference.is_running():
+        return jsonify({"status": "busy", "msg": "参考扫频正在进行，请稍候"}), 409
+    threading.Thread(target=_run_reference_bg, daemon=True).start()
+    return jsonify({"status": "started"})
 
 
 @app.route("/api/iq", methods=["GET"])
