@@ -72,6 +72,20 @@ LO_GAIN = 32767     # DDS 正弦表满量程
 ADC_FULL_SCALE_V = 1.0   # ADC 满量程电压（V）：按实际前端电路填写，默认 ±1V 占位
 
 # ---------------------------------------------------------------------------
+# 校准表格式 v2：复数系数 + 元数据 + 有效性判据
+# ---------------------------------------------------------------------------
+CAL_FORMAT_VERSION = 2
+
+# 校准表元数据（与表一起落盘）：created / ref_amp / dac_volume / sample_rate_hz / ...
+CAL_META = {}
+
+# 当前驱动的实际电平，由调用方(网页/脚本)在启动时登记，用于和表里记录的值比对
+DRIVER_STATE = {}
+
+# 幅值低于该值（ADC 码）视为没有可用信号，相位不可信（满量程 32767，16 码约 -66 dBFS）
+MIN_VALID_MAG = 16.0
+
+# ---------------------------------------------------------------------------
 # 校准表（上板实测后由 run_four_state_calibration() 自动填充）
 # 每频点一条记录（dict），包含两条路径的标定结果：
 #   {"freq": 1000.0,
@@ -83,6 +97,12 @@ CAL_TABLE = []
 # 默认校准表文件路径（仓库 data/ 目录），可由环境/调用方覆盖
 CAL_TABLE_DEFAULT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "data", "calibration_table.json")
+
+# 校准开关（终端脚本 board/cal_toggle.sh 写入；热生效，无需重启）
+CAL_MODE_DEFAULT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(CAL_TABLE_DEFAULT_PATH)), "cal_mode.json")
+_CAL_MODE = {}
+_CAL_MODE_STAMP = None
 
 # 四态参考态顺序（与 four_state_calibrate / run_four_state_calibration 一致）
 REF_STATE_NAMES = ("direct_0", "buffer_0", "direct_90", "direct_180")
@@ -122,6 +142,54 @@ def _mean_angle(deg_list):
 def norm_factor(n):
     """按实际积分点数 N 计算归一化因子（口径与 ps_ctrl.py 一致）。"""
     return n * ADC_GAIN * LO_GAIN
+
+
+def phase_is_valid(mag, min_mag=None):
+    """幅值够不够大：低于门限说明没有可用信号，此时相位只是噪声。"""
+    if mag is None:
+        return False
+    return mag > (MIN_VALID_MAG if min_mag is None else min_mag)
+
+
+def make_cal_entry(mag_gain, phase_offset_deg):
+    """构造一条 v2 校准记录：复数系数为权威值，幅值/相位字段便于人读与兼容。
+
+    约定 H_dut = H_meas * H_cal，其中 H_cal = mag_gain * exp(j*phase_offset)。
+    """
+    off = _wrap_180(phase_offset_deg)
+    g = float(mag_gain)
+    return {
+        "mag_gain": g,
+        "phase_offset_deg": off,
+        "h_re": g * math.cos(math.radians(off)),
+        "h_im": g * math.sin(math.radians(off)),
+    }
+
+
+def entry_gain_phase(entry):
+    """从一条校准记录取 (幅值增益, 相位偏移)；v2 用复数，旧表回落到两个标量。"""
+    if "h_re" in entry and "h_im" in entry:
+        return (math.hypot(entry["h_re"], entry["h_im"]),
+                math.degrees(math.atan2(entry["h_im"], entry["h_re"])))
+    return float(entry["mag_gain"]), float(entry["phase_offset_deg"])
+
+
+def note_driver(**kw):
+    """登记当前驱动电平（如 dac_volume），供 apply_calibration 与表内元数据比对。"""
+    DRIVER_STATE.update({k: v for k, v in kw.items() if v is not None})
+
+
+def _check_driver_level():
+    """表的标定电平与当前驱动不一致时告警一次（幅值会整体缩放，相位不受影响）。"""
+    if not CAL_META or not DRIVER_STATE:
+        return
+    calibrated = CAL_META.get("dac_volume")
+    current = DRIVER_STATE.get("dac_volume")
+    if calibrated is None or current is None or calibrated == current:
+        return
+    _warn_once("drv_level",
+               "校准表标定于 dac_volume=0x%02X，当前为 0x%02X：幅值基准会整体"
+               "偏移，请重新标定。" % (calibrated, current))
 
 
 # ---------------------------------------------------------------------------
@@ -180,30 +248,131 @@ def calibration_status():
         "freq_max": freq_points[-1] if freq_points else None,
         "paths": path_counts,
         "table_file": CAL_TABLE_DEFAULT_PATH if table_exists else None,
+        "meta": CAL_META,
         "message": msg,
     }
 
 
-def ensure_calibration_loaded(path=None):
-    """若校准表文件存在且内存表为空，则加载之；返回是否已有可用校准数据。
+_CAL_FILE_STAMP = None      # (mtime, size) of the table currently in memory
 
-    建议在扫频前调用一次（gen_dataset.py / app.py 的扫频入口），使校准自动生效；
-    加载失败只提示一次，不阻断测量。
+
+def ensure_calibration_loaded(path=None):
+    """确保内存里的校准表与磁盘文件一致（支持热重载）；返回是否已有可用校准数据。
+
+    建议在扫频前调用一次（dashboard / gen_dataset.py 的扫频入口）。行为：
+      * 文件没变 -> 直接返回，不重读；
+      * 文件被重新生成（mtime/size 变化）-> 自动重读，无需重启网页；
+      * 文件被删除 -> 清空内存表（回到未校准）；
+      * 加载失败 -> 提示一次，沿用当前内存表，不阻断测量。
     """
-    global CAL_TABLE
+    global CAL_TABLE, _CAL_FILE_STAMP
     path = path or CAL_TABLE_DEFAULT_PATH
-    if CAL_TABLE:
+
+    stamp = None
+    if os.path.isfile(path):
+        try:
+            stamp = (os.path.getmtime(path), os.path.getsize(path))
+        except OSError:
+            stamp = None
+
+    if stamp is not None and stamp == _CAL_FILE_STAMP and CAL_TABLE:
         return True
-    if not os.path.isfile(path):
+    if stamp is None:
+        if CAL_TABLE:
+            CAL_TABLE.clear()
+            _CAL_FILE_STAMP = None
+            print("校准表文件不存在，已清空内存表（回到未校准）")
         return False
     try:
         load_calibration_table(path)
+        _CAL_FILE_STAMP = stamp
     except Exception as exc:  # noqa: BLE001 加载失败不阻断测量，仅提示一次
         _warn_once("cal_load", "加载校准表 %s 失败（%s），本次测量将使用未校准值"
                    % (path, exc))
-        return False
+        return bool(CAL_TABLE)
     print("已加载校准表：%s（%d 个频点）" % (path, len(CAL_TABLE)))
     return bool(CAL_TABLE)
+
+
+# ---------------------------------------------------------------------------
+# 输入端频变阻抗去嵌入（v1）
+# ---------------------------------------------------------------------------
+_INPUT_NETWORK = None
+_INPUT_NETWORK_FAILED = False
+
+
+def _apply_input_network(h_dut, freq):
+    """把 codec 输入端的频变阻抗从测量中扣掉，再以恒定 R_ref 重新嵌入。
+
+    输入: 已做短接校准的复数 H；输出: 去嵌入后的复数 H。
+    表文件缺失/损坏时静默回退到短接校准值，只告警一次。
+    """
+    global _INPUT_NETWORK, _INPUT_NETWORK_FAILED
+    if _INPUT_NETWORK_FAILED:
+        return h_dut
+    if _INPUT_NETWORK is None:
+        try:
+            import input_network as mod
+            mod.load()
+            _INPUT_NETWORK = mod
+        except Exception as exc:  # noqa: BLE001 不阻断测量
+            _INPUT_NETWORK_FAILED = True
+            _warn_once("input_network",
+                       "输入网络去嵌入不可用（%s），本次返回短接校准值" % exc)
+            return h_dut
+    try:
+        return _INPUT_NETWORK.deembed_complex(h_dut, freq)
+    except Exception as exc:  # noqa: BLE001
+        _warn_once("input_network_run",
+                   "输入网络去嵌入失败（%s），本次返回短接校准值" % exc)
+        return h_dut
+
+
+def reload_input_network(path=None):
+    """重新加载 input_network.json（换夹具/换增益档后调用）。"""
+    global _INPUT_NETWORK, _INPUT_NETWORK_FAILED
+    _INPUT_NETWORK = None
+    _INPUT_NETWORK_FAILED = False
+    try:
+        import input_network as mod
+        mod.load(path)
+        _INPUT_NETWORK = mod
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _INPUT_NETWORK_FAILED = True
+        _warn_once("input_network_reload",
+                   "重新加载输入网络表失败（%s）" % exc)
+        return False
+
+
+def load_cal_mode(path=None):
+    """读 data/cal_mode.json（不存在时视为全部启用），按 (mtime,size) 缓存。
+
+    字段：
+      direct:  是否启用直连校准表
+      buffer:  是否启用缓冲校准表
+      hplane:  是否对直连路径套用 H 平面（输入网络）表
+    """
+    global _CAL_MODE, _CAL_MODE_STAMP
+    path = path or CAL_MODE_DEFAULT_PATH
+    try:
+        st = os.stat(path)
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        _CAL_MODE = {}
+        _CAL_MODE_STAMP = None
+        return _CAL_MODE
+    if stamp == _CAL_MODE_STAMP and _CAL_MODE:
+        return _CAL_MODE
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            _CAL_MODE = json.load(fh) or {}
+        _CAL_MODE_STAMP = stamp
+    except Exception as exc:  # noqa: BLE001
+        _warn_once("cal_mode", "读取 %s 失败（%s），按全部启用处理" % (path, exc))
+        _CAL_MODE = {}
+        _CAL_MODE_STAMP = stamp
+    return _CAL_MODE
 
 
 def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT):
@@ -214,6 +383,12 @@ def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT):
     表文件存在则自动加载，仍无数据或该路径未标定时返回原值并提示一次。
     返回: (mag_cal, phase_cal)
     """
+    mode = load_cal_mode()
+    if mode.get(path) is False:
+        _warn_once("cal_mode_" + path,
+                   "%s 校准已被 cal_mode.json 禁用，返回原始测量" % path)
+        return mag, phase
+
     if not CAL_TABLE:
         if not ensure_calibration_loaded():
             _warn_once("cal_empty",
@@ -227,29 +402,46 @@ def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT):
                    "校准表中无 %s 路径的标定数据（four_state_calibrate 未覆盖该路径），"
                    "本次返回未校准值。" % path)
         return mag, phase
+    _check_driver_level()
     rows = sorted(rows, key=lambda r: r["freq"])
 
     def _point(row):
-        return row["freq"], row[path]["mag_gain"], row[path]["phase_offset_deg"]
+        return row["freq"], entry_gain_phase(row[path])
 
+    # 找出频点所在的区间（范围外用最近端点外推）
     if freq <= rows[0]["freq"]:
-        _f, gain, off = _point(rows[0])
-        return mag * gain, _wrap_180(phase + off)
-    if freq >= rows[-1]["freq"]:
-        _f, gain, off = _point(rows[-1])
-        return mag * gain, _wrap_180(phase + off)
+        _f, (gain, off) = _point(rows[0])
+    elif freq >= rows[-1]["freq"]:
+        _f, (gain, off) = _point(rows[-1])
+    else:
+        gain = off = None
+        for i in range(len(rows) - 1):
+            f0, (g0, p0) = _point(rows[i])
+            f1, (g1, p1) = _point(rows[i + 1])
+            if f0 <= freq <= f1:
+                t = (freq - f0) / (f1 - f0) if f1 != f0 else 0.0
+                # 幅值按对数插值（更接近物理），相位按增量插值（自动跨 ±180）
+                if g0 > 0 and g1 > 0:
+                    gain = math.exp(math.log(g0) +
+                                    (math.log(g1) - math.log(g0)) * t)
+                else:
+                    gain = g0 + (g1 - g0) * t
+                off = _wrap_180(p0 + _wrap_180(p1 - p0) * t)
+                break
+        if gain is None:                      # 兜底（正常流程到不了这里）
+            return mag, phase
 
-    for i in range(len(rows) - 1):
-        f0, g0, p0 = _point(rows[i])
-        f1, g1, p1 = _point(rows[i + 1])
-        if f0 <= freq <= f1:
-            t = (freq - f0) / (f1 - f0) if f1 != f0 else 0.0
-            gain = g0 + (g1 - g0) * t
-            offset = _wrap_180(p0 + _wrap_180(p1 - p0) * t)
-            return mag * gain, _wrap_180(phase + offset)
-
-    # 兜底（正常流程到不了这里）
-    return mag, phase
+    # 复数域去嵌入：H_dut = H_meas * H_cal
+    h_meas = complex(mag * math.cos(math.radians(phase)),
+                     mag * math.sin(math.radians(phase)))
+    h_cal = complex(gain * math.cos(math.radians(off)),
+                    gain * math.sin(math.radians(off)))
+    h_dut = h_meas * h_cal
+    # 输入网络表只针对 direct（短接）路径标定；buffer 路径由缓冲器隔离，不套用
+    if path == CAL_PATH_DIRECT and mode.get("hplane", True) is not False:
+        h_dut = _apply_input_network(h_dut, freq)
+    return (abs(h_dut),
+            _wrap_180(math.degrees(math.atan2(h_dut.imag, h_dut.real))))
 
 
 def four_state_calibrate(freq, ref_amp_v, measured):
@@ -295,8 +487,8 @@ def four_state_calibrate(freq, ref_amp_v, measured):
 
     row = {
         "freq": float(freq),
-        CAL_PATH_DIRECT: {"mag_gain": mag_gain_dir, "phase_offset_deg": phase_off_dir},
-        CAL_PATH_BUFFER: {"mag_gain": mag_gain_buf, "phase_offset_deg": phase_off_buf},
+        CAL_PATH_DIRECT: make_cal_entry(mag_gain_dir, phase_off_dir),
+        CAL_PATH_BUFFER: make_cal_entry(mag_gain_buf, phase_off_buf),
     }
     for r in CAL_TABLE:
         if abs(r["freq"] - freq) < 1e-9:
@@ -369,12 +561,22 @@ def run_four_state_calibration(freqs, ref_amp_v, measure_state=None, periods=10,
 
 
 def save_calibration_table(path):
-    """把校准表保存为 JSON 文件，便于上板后归档与复用。"""
+    """把校准表保存为 JSON（v2：meta + rows）。"""
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(CAL_TABLE, fh, ensure_ascii=False, indent=2)
+    payload = {
+        "format": CAL_FORMAT_VERSION,
+        "meta": CAL_META,
+        "rows": CAL_TABLE,
+    }
+    # 先写临时文件再原子替换：中途失败（异常/断电）不会把原表截成 0 字节
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 def load_calibration_table(path):
@@ -383,10 +585,26 @@ def load_calibration_table(path):
     兼容旧格式：旧表每行为 [freq, mag_gain, phase_offset]（仅直连），
     加载时自动转换为新结构（buffer 路径留空，apply_calibration 会提示）。
     """
-    global CAL_TABLE
-    with open(path, "r", encoding="utf-8") as fh:
-        data = json.load(fh)
+    global CAL_TABLE, CAL_META
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        _warn_once("cal_zero", "校准表文件为空或不存在：%s，按空表处理" % path)
+        CAL_TABLE = []
+        CAL_META = {}
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except ValueError as exc:
+        _warn_once("cal_badjson", "校准表 JSON 解析失败（%s）：%s，按空表处理"
+                   % (exc, path))
+        CAL_TABLE = []
+        CAL_META = {}
+        return
 
+    CAL_META = {}
+    if isinstance(data, dict):                 # v2
+        CAL_META = data.get("meta") or {}
+        data = data.get("rows") or []
     CAL_TABLE = []
     for row in data:
         if isinstance(row, list) and len(row) >= 3:     # 旧格式：仅直连

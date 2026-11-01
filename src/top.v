@@ -35,6 +35,7 @@ module top (
     wire signed [47:0] acc_Q_full;  
     wire signed [15:0] rx_left_data;
     wire signed [15:0] rx_right_data;
+    wire signed [15:0] rx_mix_data;      // L+R（饱和），夹具接 Tip 或 Ring 都能测
     wire               rx_data_valid;
 
     // ------------------------------------------------------------------
@@ -64,12 +65,13 @@ module top (
     i2s_rx u_i2s_rx (
             .clk(clk), .rst_n(sys_rst_n), // 用内部复位
             .i2s_bclk(i2s_bclk), .i2s_lrclk(i2s_lrclk), .i2s_sdata_in(i2s_sdata_in),
-            .left_data(rx_left_data), .right_data(rx_right_data), .data_valid(rx_data_valid)
+            .left_data(rx_left_data), .right_data(rx_right_data),
+            .mix_data(rx_mix_data), .data_valid(rx_data_valid)
         );
         
     demod u_demod (
         .clk(clk), .rst_n(sys_rst_n), .en(wire_sweep_en), .clear(wire_sweep_clear), 
-        .adc_in(rx_left_data), // ★ 改：用真实的左声道数据输入！而不是自环了！
+        .adc_in(rx_mix_data),  // 左右声道相加（饱和）：夹具接 Tip 或 Ring 都能测
         .ref_cos(wire_dds_cosine), .ref_sin(-wire_dds_sine), 
         .acc_I(acc_I_full), .acc_Q(acc_Q_full)  
     );
@@ -80,6 +82,26 @@ module top (
     localparam MEASURE = 2'd1;
     localparam FLUSH = 2'd2;   // 积分窗满后多停一拍，把最后一个 mix 压进 acc
     localparam DONE = 2'd3;
+
+    // ★ 启动对齐到 I2S 采样边界：
+    //   ps_start 来自 AXI GPIO，可以落在 2048 拍帧内的任意位置。原实现
+    //   直接用它启动状态机/释放 DDS，于是“DDS 复位 → 第一个 rx_data_valid”
+    //   的拍数在 0~2048 之间随机，第一个积分样本的参考相位就带一个
+    //   0~1 个采样（20.48 us；20 kHz 时约 147°）的随机偏移。
+    //   这里先把启动请求锁存，等下一个 rx_data_valid 再真正启动：
+    //   DDS 总在采样边界释放，第一个积分样本固定在其后的下一个采样边界，
+    //   相位基准跨进程/跨次测量一致，标定表才有可复现的意义。
+    reg start_pending;
+    wire start_here = start_pending && rx_data_valid && (state == IDLE);
+
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n)
+            start_pending <= 1'b0;
+        else if (start_here)
+            start_pending <= 1'b0;
+        else if (ps_start && (state == IDLE))
+            start_pending <= 1'b1;
+    end
 
     // ★ 对外输出改为锁存值：MEASURE / FLUSH 期间输出保持为 0（或上一次的旧值），
     //   不会把半途的累加结果暴露给软件；DONE 之后输出的是整窗积分快照。
@@ -99,10 +121,9 @@ module top (
     assign wire_sweep_en = ((state == MEASURE) && rx_data_valid) || (state == FLUSH);
 
     // ★ 关键修改：DDS 在每个测量窗口开始前都被复位到 0 相位。
-    //   IDLE 期间 dds_rst_n 一直为低，DDS 的 phase_acc 和 sine/cosine 保持 0；
-    //   状态机进入 MEASURE 后释放复位，DDS 从 phase_acc = 0 开始累加，
-    //   因此每个频点的相位基准都是绝对固定的，不再受上电/启动时刻影响。
-    //   同时该复位与 demod 的 clear（IDLE 有效）保持同一时间基准。
+    //   现在复位释放点由 start_here 对齐到 rx_data_valid（采样边界），
+    //   不再随 ps_start 在 2048 拍帧内的位置漂移；第一个积分样本固定
+    //   落在其后的下一个采样边界，因此相位基准是确定的。
     assign dds_rst_n = sys_rst_n && (state != IDLE);
 
     always @(posedge clk or negedge sys_rst_n) begin
@@ -112,7 +133,7 @@ module top (
         end else begin
             case (state)
                 IDLE: begin
-                    if (ps_start) begin
+                    if (start_here) begin
                         state <= MEASURE;
                         sample_count <= 0;
                     end
@@ -184,11 +205,11 @@ module top (
     always @(posedge clk) begin
         if (!sys_rst_n)
             mclk_div <= 4'd0;
-        else if (mclk_div == 4'd9)
+        else if (mclk_div == 4'd3)
             mclk_div <= 4'd0;
         else
             mclk_div <= mclk_div + 1'b1;
     end
-    assign au_mclk = (mclk_div < 4'd5);
+    assign au_mclk = (mclk_div < 4'd2);
 
 endmodule

@@ -1,177 +1,339 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""用网页扫频写入的 data/history.csv 填写校准表。
+"""扫频标定：自己启动扫频、多次平均后填写校准表。
 
-工作流（在板端终端执行）：
+工作流（板端终端执行）：
 
-  1) 网页点击“开始扫频测量”（每次都会把同一份数据追加到 data/history.csv）
-  2) 按当前夹具状态填写校准表，例如直连态：
-         python3 board/calibrate_path.py --state direct --ref-amp 1.0
-     缓冲态：
-         python3 board/calibrate_path.py --state buffer --ref-amp 1.0
-  3) 填完某一态后手动清除历史，准备下一态：
-         python3 board/calibrate_path.py --clear-history
+    python3 board/calibrate_path.py --state direct --ref-amp 1.0 --repeat 5
+    python3 board/calibrate_path.py --state buffer --ref-amp 1.0 --repeat 5
 
-说明：
-  * history.csv 里只存未校准数据：优先使用 mag_v_raw / phase_deg_raw；
-    缺少原始列的行会被跳过，绝不使用可能已校准的 mag_db / phase_deg。
-  * --sweep latest（默认）只取最近一次网页扫频；--sweep all 取全部历史。
-  * --mode 默认只取 pynq_rtl 的历史行（audio/demo 不会混入）；any 不过滤。
-  * phase_valid=0 的低信噪比点会被跳过。
-  * 只读写文件，不加载 PL、不需要 XILINX_XRT；可以直接在普通终端运行。
+做的事：
+  1. 加载 PL 设计并配置 codec（与网页端完全相同的路径）
+  2. 按网页端一致的 240 点对数扫频（20 Hz ~ 20 kHz），重复 --repeat 次
+  3. 逐频点做**复数平均**，据此算 mag_gain / phase_offset，写入校准表
+
+重要约定：
+  * 本脚本扫出来的数据**不会**写进 data/history.csv。
+    history.csv 只记录网页端「开始扫频测量」发起的扫频（含未校准与已校准两套值）。
+  * 标定期间不要同时在网页端点击扫频，两者会争用 PL 与 AXI 寄存器。
+  * 标定前确认夹具处于对应状态：direct=短接，buffer=缓冲(电压跟随)。
+
+校准表为 v2 格式：{format, meta, rows}；每条记录含复数系数 h_re/h_im 与
+便于人读的 mag_gain/phase_offset_deg，另存 ref_amp / dac_volume / repeat 等元数据。
 """
 import argparse
-import csv
 import math
 import os
+import statistics
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "python_model"))
+sys.path.insert(0, os.path.join(ROOT, "board"))
+
+# PYNQ 3.1 需要在 import pynq 之前设置 XILINX_XRT，否则空设备列表会被缓存
+os.environ.setdefault("XILINX_XRT", "/usr")
 
 import calibration as cal  # noqa: E402
 
-DEFAULT_HISTORY = os.path.join(ROOT, "data", "history.csv")
 DEFAULT_TABLE = cal.CAL_TABLE_DEFAULT_PATH
+DEFAULT_HISTORY = os.path.join(ROOT, "data", "history.csv")
+
+# 与 dashboard/app.py 的 SWEEP_POINTS / _log_spaced_freqs 保持一致
+SWEEP_POINTS = 240
+SWEEP_STOP_HZ = 20000.0
+SWEEP_START_FLOOR_HZ = 20.0
+# 单轮扫频的默认超时（秒）。超过即中止并抛 TimeoutError。
+SWEEP_TIMEOUT_S = 120.0
 
 
-def _wrap180(deg):
-    deg = math.fmod(deg, 360.0)
-    if deg > 180.0:
-        deg -= 360.0
-    elif deg <= -180.0:
-        deg += 360.0
-    return deg
-
-
-def _load_rows(path):
-    with open(path, "r", encoding="utf-8-sig", newline="") as fh:
-        return list(csv.DictReader(fh))
-
-
-def _is_valid(row):
-    value = str(row.get("phase_valid", "1")).strip().lower()
-    return value not in ("0", "false", "no", "")
-
-
-def _raw_point(row):
-    """返回 (freq_hz, mag_raw, phase_raw_deg)；只接受未校准列，缺列返回 None。"""
+# ---------------------------------------------------------------------------
+# 扫频
+# ---------------------------------------------------------------------------
+def ensure_pynq_interpreter():
+    """当前解释器没有 pynq 时，自动切换到 PYNQ 的 venv 解释器重跑。"""
     try:
-        freq = float(row["freq_hz"])
-        if row.get("mag_v_raw") not in (None, ""):
-            mag = float(row["mag_v_raw"])
-        elif row.get("mag_db_raw") not in (None, ""):
-            mag = 10.0 ** (float(row["mag_db_raw"]) / 20.0)
-        else:
-            return None
-        if row.get("phase_deg_raw") not in (None, ""):
-            phase = float(row["phase_deg_raw"])
-        else:
-            return None
-    except (KeyError, TypeError, ValueError):
-        return None
-    if freq <= 0 or mag <= 0:
-        return None
-    return freq, mag, phase
+        import pynq  # noqa: F401
+        return
+    except ImportError:
+        pass
+    venv = "/usr/local/share/pynq-venv/bin/python3"
+    if os.path.isfile(venv) and os.path.realpath(sys.executable) != os.path.realpath(venv):
+        print("当前解释器没有 pynq，切换到 %s 重新执行" % venv)
+        os.execv(venv, [venv] + sys.argv)
 
 
-def _load_table(path):
+def log_spaced_freqs(start_hz, stop_hz, count):
+    if start_hz <= 0 or stop_hz <= start_hz or count < 2:
+        raise ValueError("扫频范围或点数无效")
+    ratio = (stop_hz / start_hz) ** (1.0 / (count - 1))
+    return [start_hz * ratio ** index for index in range(count)]
+
+
+def load_design():
+    """加载自定义设计并配置 codec（与网页端 _ensure_rtl_design 等价）。"""
+    import acceptance
+
+    info = acceptance.configure_codec()
+    loaded = acceptance.load_design(acceptance.ensure_bitstream(), 1e8)
+    return info, loaded
+
+
+def sweep_once(freqs, periods, timeout_s=SWEEP_TIMEOUT_S, verbose=True, label=""):
+    """按给定频点扫一遍，返回 [(freq, mag, phase), ...]（未校准）。
+
+    timeout_s > 0 时，单轮累计用时超过该值立即抛 TimeoutError（每测完一个
+    频点检查一次，所以不会等到整轮跑完才发现）。
+    """
+    import ps_ctrl
+
+    out = []
+    t0 = time.monotonic()
+    for index, freq in enumerate(freqs):
+        period = (periods[index] if isinstance(periods, (list, tuple)) else periods)
+        acc_i, acc_q, window_n = ps_ctrl.measure_once(freq, periods=period)
+        mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
+        out.append((freq, mag, phase))
+        elapsed = time.monotonic() - t0
+        if timeout_s and elapsed > timeout_s:
+            raise TimeoutError(
+                "%s扫频超过 %.0f s 仍未结束（已完成 %d/%d 点，最后一点 %.1f Hz），已中止"
+                % (label, timeout_s, index + 1, len(freqs), freq))
+        if verbose and (index + 1) % 60 == 0:
+            print("    ... %d/%d 点，已用 %.1f s" % (index + 1, len(freqs), elapsed))
+    return out
+
+
+def complex_average(sweeps):
+    """把多次扫频的结果逐频点做复数平均。
+
+    返回每项：(freq, mag_avg, phase_avg, coherence, mag_spread_pct)
+      coherence     = |mean(H)| / mean(|H|)，1 表示完全一致，接近 0 表示相位乱跳
+      mag_spread_pct= 幅值标准差 / 均值
+    """
+    n = len(sweeps[0])
+    result = []
+    for k in range(n):
+        freq = sweeps[0][k][0]
+        re = im = 0.0
+        mags = []
+        for sweep in sweeps:
+            _f, m, p = sweep[k]
+            re += m * math.cos(math.radians(p))
+            im += m * math.sin(math.radians(p))
+            mags.append(m)
+        re /= len(sweeps)
+        im /= len(sweeps)
+        mag_avg = math.hypot(re, im)
+        phase_avg = math.degrees(math.atan2(im, re))
+        mean_mag = sum(mags) / len(mags)
+        coherence = mag_avg / mean_mag if mean_mag > 0 else 0.0
+        spread = (statistics.pstdev(mags) / mean_mag * 100.0) if mean_mag > 0 else 999.0
+        result.append((freq, mag_avg, phase_avg, coherence, spread))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 校准表
+# ---------------------------------------------------------------------------
+def load_table(path):
     table = {}
     if not os.path.isfile(path):
-        return table
-    try:
-        cal.load_calibration_table(path)
-    except Exception as exc:  # noqa: BLE001
-        print("[WARN] 现有校准表读取失败，将新建：%s" % exc)
-        return table
+        return table, {}
+    cal.load_calibration_table(path)
     for row in cal.CAL_TABLE:
         if isinstance(row, dict) and "freq" in row:
             table[round(float(row["freq"]), 6)] = row
-    return table
+    return table, dict(cal.CAL_META or {})
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="用 data/history.csv 填写校准表 / 清除历史")
-    parser.add_argument("--state", choices=(cal.CAL_PATH_DIRECT,
-                                            cal.CAL_PATH_BUFFER),
-                        help="本次历史数据对应的校准态：direct 或 buffer")
+        description="扫频标定：自己启动扫频、多次平均后填写校准表")
+    parser.add_argument("--state", choices=(cal.CAL_PATH_DIRECT, cal.CAL_PATH_BUFFER),
+                        help="本次标定的路径：direct 或 buffer")
     parser.add_argument("--ref-amp", type=float, default=1.0,
-                        help="DUT 输入端已知峰值幅度（V），默认 1.0 做相对校准")
-    parser.add_argument("--history", default=DEFAULT_HISTORY,
-                        help="历史数据 CSV（默认 data/history.csv）")
+                        help="DUT 输入端已知幅值（默认 1.0，做相对标定）")
+    parser.add_argument("--repeat", type=int, default=3,
+                        help="扫频次数，逐频点复数平均（默认 3）")
+    parser.add_argument("--budget", type=float, default=None,
+                        help="single-sweep time budget in seconds (0=off, default off); "
+                             "0 means keep the periods schedule fixed even if slow")
+    parser.add_argument("--n-target", type=float, default=None,
+                        help="target integration samples per point (default 2500)")
+    parser.add_argument("--periods", type=float, default=None,
+                        help="override periods for every point (default: auto by frequency)")
+    parser.add_argument("--points", type=int, default=SWEEP_POINTS,
+                        help="扫频频点数（默认 240，须与网页端一致）")
+    parser.add_argument("--sweep-timeout", type=float, default=SWEEP_TIMEOUT_S,
+                        help="单轮扫频的超时秒数，超过即中止（默认 %.0f，0=不限制）"
+                        % SWEEP_TIMEOUT_S)
+    parser.add_argument("--start-hz", type=float, default=None,
+                        help="扫频起点（默认与网页端相同：max(20, SAFE_MIN_FREQ_HZ)）")
+    parser.add_argument("--stop-hz", type=float, default=SWEEP_STOP_HZ,
+                        help="扫频终点（默认 20000）")
     parser.add_argument("--table", default=DEFAULT_TABLE,
                         help="校准表 JSON（默认 data/calibration_table.json）")
-    parser.add_argument("--sweep", choices=("latest", "all"), default="latest",
-                        help="latest=只取最近一次网页扫频（默认）；all=全部历史")
-    parser.add_argument("--mode", default="pynq_rtl",
-                        help="只使用该 mode 的历史行（默认 pynq_rtl；any=不过滤）")
+    parser.add_argument("--min-mag", type=float, default=cal.MIN_VALID_MAG,
+                        help="低于该幅值(ADC码)视为无信号，跳过（默认 %.0f）"
+                        % cal.MIN_VALID_MAG)
+    parser.add_argument("--drop-db", type=float, default=40.0,
+                        help="低于本表中位数该 dB 数的点判为弱信号并跳过（默认 40）")
+    parser.add_argument("--min-coherence", type=float, default=0.0,
+                        help="复数一致性低于该值的频点跳过（0 = 不启用）")
+    parser.add_argument("--dac-volume", type=lambda s: int(s, 0), default=0x10,
+                        help="标定时 DAC 数字音量寄存器 0x402B 的值（默认 0x10）")
+    parser.add_argument("--note", default="", help="写进校准表元数据的备注")
+    parser.add_argument("--no-load", action="store_true",
+                        help="跳过 PL/codec 加载（设计已由网页端加载好时使用）")
     parser.add_argument("--clear-history", action="store_true",
-                        help="删除历史数据文件后退出（填完某一态后手动执行）")
+                        help="仅删除 data/history.csv 后退出（与标定流程无关）")
     args = parser.parse_args()
 
     if args.clear_history:
-        if os.path.isfile(args.history):
-            os.remove(args.history)
-            print("已清除历史数据：%s" % args.history)
+        if os.path.isfile(DEFAULT_HISTORY):
+            os.remove(DEFAULT_HISTORY)
+            print("已清除历史数据：%s" % DEFAULT_HISTORY)
         else:
-            print("历史文件不存在，无需清除：%s" % args.history)
+            print("历史文件不存在，无需清除：%s" % DEFAULT_HISTORY)
         return 0
 
     if not args.state:
-        parser.error("--state 必填（direct 或 buffer）；"
-                     "清除历史请使用 --clear-history")
+        parser.error("--state 必填（direct 或 buffer）")
     if args.ref_amp <= 0:
         parser.error("--ref-amp 必须为正数")
-    if not os.path.isfile(args.history):
-        raise SystemExit("找不到历史数据：%s" % args.history)
+    if args.repeat < 1:
+        parser.error("--repeat 必须 >= 1")
 
-    rows = _load_rows(args.history)
-    if not rows:
-        raise SystemExit("历史数据为空：%s" % args.history)
+    ensure_pynq_interpreter()
 
-    if args.mode != "any":
-        rows = [row for row in rows if row.get("mode", "") == args.mode]
-        if not rows:
-            raise SystemExit(
-                "历史中没有 mode=%s 的数据（可用 --mode any 查看全部）"
-                % args.mode)
+    # ---- 1. 加载设计 ----
+    if not args.no_load:
+        print("[1/4] 加载 PL 设计并配置 codec ...")
+        t0 = time.monotonic()
+        info, loaded = load_design()
+        print("      完成 %.1fs | %s | codec: line_in=%s dac_unmuted=%s"
+              % (time.monotonic() - t0,
+                 os.path.basename(str(loaded.get("loaded_path", ""))),
+                 info.get("line_in_selected"), info.get("dac_unmuted")))
+    else:
+        print("[1/4] 跳过设计加载（--no-load）")
 
-    if args.sweep == "latest":
-        latest = max((row.get("sweep_id", "") for row in rows), default="")
-        rows = [row for row in rows if row.get("sweep_id", "") == latest]
-        print("使用最近一次扫频：sweep_id=%s（%d 行）" % (latest, len(rows)))
+    import ps_ctrl
 
+    if args.budget is None:            # 默认跟随 ps_ctrl 的全局预算
+        args.budget = ps_ctrl.SWEEP_TIME_BUDGET_S
+
+    start_hz = args.start_hz
+    if start_hz is None:
+        start_hz = max(SWEEP_START_FLOOR_HZ, ps_ctrl.SAFE_MIN_FREQ_HZ)
+    freqs = log_spaced_freqs(start_hz, args.stop_hz, args.points)
+    # 每点周期数：高频多积分；并按 --budget 压缩低频段，保证单轮时长可控
+    if args.periods is not None:
+        period_list = [float(args.periods)] * len(freqs)
+        pinfo = {"predicted_s": sum(p / f for p, f in zip(period_list, freqs)),
+                 "scale_low": 1.0, "min": args.periods, "max": args.periods}
+    else:
+        kw = {"budget_s": args.budget}
+        if args.n_target is not None:
+            kw["n_target"] = args.n_target
+        period_list, pinfo = ps_ctrl.build_period_schedule(freqs, **kw)
+        budget_txt = ("不限制" if not args.budget else "%.0f s" % args.budget)
+        print("      每点周期数 %.0f ~ %.0f (20kHz=%.0f), 目标样本数 %.0f, "
+              "预测单轮 %.1f s, 时长预算 %s, 超时保护 %.0f s"
+              % (pinfo["min"], pinfo["max"], period_list[-1],
+                 pinfo["n_target"], pinfo["predicted_s"], budget_txt,
+                 args.sweep_timeout))
+
+    print("[2/4] 扫频 %d 点 x %d 次（%.2f Hz ~ %.0f Hz）"
+          % (len(freqs), args.repeat, freqs[0], freqs[-1]))
+    print("      注意：本次数据不会写入 history.csv")
+
+    sweeps = []
+    for k in range(args.repeat):
+        tag = "第 %d/%d 轮" % (k + 1, args.repeat)
+        print("    [扫频] %s 开始 ..." % tag)
+        t0 = time.monotonic()
+        try:
+            sweep = sweep_once(freqs, period_list, timeout_s=args.sweep_timeout,
+                               label=tag)
+        except TimeoutError as exc:
+            raise SystemExit("[扫频] 超时中止：%s" % exc)
+        elapsed = time.monotonic() - t0
+        sweeps.append(sweep)
+        print("    [扫频] %s 完成：用时 %.1f s（%d 点，平均 %.1f ms/点）"
+              % (tag, elapsed, len(freqs), elapsed / len(freqs) * 1000.0))
+        if args.budget and elapsed > args.budget and k + 1 < args.repeat:
+            # 仅在显式给了 --budget 时才收缩；默认 0 = 保持调度不变
+            period_list = [max(ps_ctrl.PERIODS_MIN, p * 0.85) for p in period_list]
+            print("      [budget] over %.0f s -> periods x0.85 next round"
+                  % args.budget)
+
+    # ---- 2. 复数平均 ----
+    print("[3/4] 复数平均 ...")
+    averaged = complex_average(sweeps)
+    cohs = [a[3] for a in averaged]
+    spreads = [a[4] for a in averaged]
+    print("      一致性 coherence: median %.4f, min %.4f"
+          % (statistics.median(cohs), min(cohs)))
+    print("      幅值离散度: median %.2f%%, max %.2f%%"
+          % (statistics.median(spreads), max(spreads)))
+    worst = sorted(averaged, key=lambda a: a[3])[:5]
+    print("      一致性最差的频点: " +
+          ", ".join("%.0fHz(%.3f)" % (a[0], a[3]) for a in worst))
+
+    # ---- 3. 门限 + 写表 ----
+    cand = {}
+    dropped_weak = dropped_coh = 0
+    for freq, mag_avg, phase_avg, coherence, _spread in averaged:
+        if not cal.phase_is_valid(mag_avg, args.min_mag):
+            dropped_weak += 1
+            continue
+        if args.min_coherence > 0 and coherence < args.min_coherence:
+            dropped_coh += 1
+            continue
+        cand[freq] = (mag_avg, phase_avg)
+
+    if not cand:
+        raise SystemExit("没有可用的频点（检查 --min-mag / --min-coherence）")
+
+    med = statistics.median([v[0] for v in cand.values()])
+    floor = med * 10.0 ** (-args.drop_db / 20.0)
     points = {}
-    skipped = 0
-    for row in rows:
-        if not _is_valid(row):
-            skipped += 1
+    for freq, (mag_avg, phase_avg) in cand.items():
+        if mag_avg < floor:
+            dropped_weak += 1
             continue
-        parsed = _raw_point(row)
-        if parsed is None:
-            skipped += 1
-            continue
-        freq, mag, phase = parsed
-        points[freq] = (mag, phase)
+        points[freq] = (mag_avg, phase_avg, args.ref_amp / mag_avg)
 
-    if not points:
-        raise SystemExit("没有可用的频点（检查 phase_valid / mag_v_raw）")
-
-    table = _load_table(args.table)
+    table, _old_meta = load_table(args.table)
     for freq in sorted(points):
-        mag, phase = points[freq]
+        _mag, phase_avg, gain = points[freq]
         key = round(float(freq), 6)
         row = table.setdefault(key, {"freq": float(freq)})
-        row[args.state] = {
-            "mag_gain": args.ref_amp / mag,
-            "phase_offset_deg": _wrap180(-phase),
-        }
+        row[args.state] = cal.make_cal_entry(gain, -phase_avg)
 
     cal.CAL_TABLE = [table[key] for key in sorted(table)]
+    # 元数据描述"最近一次标定动作"，整体替换，避免混入旧表的 sweep_id 等字段
+    cal.CAL_META = {
+        "format": cal.CAL_FORMAT_VERSION,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "ref_amp": args.ref_amp,
+        "dac_volume": args.dac_volume,
+        "state": args.state,
+        "repeat": args.repeat,
+        "periods": args.periods,
+        "freq_points": args.points,
+        "source": "calibrate_path.py self-sweep",
+        "note": args.note,
+    }
     cal.save_calibration_table(args.table)
-    print("已写入 %s：%s 路径 %d 个频点（跳过 %d 个无效点；参考幅值 %.4g）"
-          % (args.table, args.state, len(points), skipped, args.ref_amp))
+
+    print("[4/4] 已写入 %s：%s 路径 %d 个频点"
+          % (args.table, args.state, len(points)))
+    print("      丢弃：弱信号 %d，一致性不足 %d；平均 %d 次扫频"
+          % (dropped_weak, dropped_coh, args.repeat))
     return 0
 
 
