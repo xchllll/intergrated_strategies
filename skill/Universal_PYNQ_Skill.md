@@ -36,9 +36,6 @@
   5. **脚本/服务路径**：`start_dashboard.sh` 用 `sudo env XILINX_XRT=/usr ... /usr/local/share/pynq-venv/bin/python3 run_dashboard.py`；直接 `python3 run_dashboard.py` 由 re-exec 兜底。
 - **失效条件**：若多个进程同时加载 bitstream/争用 `/dev/mem`，会出现 `Resource busy`；需要先 `pkill` 旧 dashboard 再启动。
 
-
-## 七、数据与机器学习
-
 ### 4. Python-PL 软硬联调的轮询时间规范
 
 - **适用场景**：PS 侧通过 Python 操作 MMIO（如 AXI GPIO）控制 PL 状态机，并轮询 `done` 信号时。
@@ -56,9 +53,6 @@
   2. **冲突点**：调用官方音频驱动会加载 base.bit 重置 PL，但全局标志位仍为 `True`，切回 RTL 时会因寄存器不对而超时死机。
   3. **强制复位**：在初始化音频驱动（`force_reinit=True`）时，必须显式将 `_RTL_DESIGN_LOADED = False`。
 - **验证方法**：RTL扫频 -> 切到Audio模式 -> 再切回 RTL 扫频，若无 `out_done 超时` 报错，则说明状态位复位成功。
-
-
-## 五、测量与校准
 
 ## 二、其他通用 PYNQ 技能（按可复用性从高到低）
 
@@ -191,6 +185,3 @@
   1. **字体配置**：必须在导入 `matplotlib.pyplot` 之前，强制指定后备字体并修复负号显示。
   2. **配置代码**：`plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "Noto Sans CJK SC", "SimHei", "DejaVu Sans"]` 并且 `plt.rcParams["axes.unicode_minus"] = False`。
 - **失效条件**：若运行环境（如极简 Linux）完全没有安装上述任何一种中文字体，图片依然会显示方块。
-
-
-## 二、RTL / FPGA 设计
