@@ -23,10 +23,3 @@ diagnosis_system/.venv/
 .DS_Store
 Thumbs.db
 bypass_drc.tcl
-
-# Board acceptance output
-data/acceptance_latest.json
-
-# 运行时历史数据与校准表（由网页/校准脚本生成，不纳入版本管理）
-data/history.csv
-data/calibration_table.json

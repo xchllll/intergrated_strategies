@@ -1,0 +1,54 @@
+{
+  "timestamp": "2026-10-26 10:13:28",
+  "backend": "rtl",
+  "bitstream": "/home/xilinx/jupyter_notebooks/project/board/design_1_wrapper.bit",
+  "codec": {
+    "driver": "AudioADAU1761",
+    "line_in_selected": true,
+    "dac_unmuted": true,
+    "pll_rearmed": true
+  },
+  "design": {
+    "loaded_path": "/home/xilinx/jupyter_notebooks/project/board/design_1_wrapper.xsa",
+    "clock_before_mhz": 62.5,
+    "clock_actual_mhz": 100.0
+  },
+  "measurement": {
+    "freq_hz": 1000.0,
+    "periods_requested": 10,
+    "phase_inc": 42950,
+    "phase_inc_hex": "0x0000A7C6",
+    "window_n": 488,
+    "fpga_clock_hz": 100000000.0,
+    "audio_sample_rate_hz": 48828.125,
+    "integration_seconds": 0.00999424,
+    "elapsed_seconds": 0.012105600000040795,
+    "done": true,
+    "acc_i": -28613,
+    "acc_q": 29952,
+    "acc_i_hex": "0xFFFFFFFF903B",
+    "acc_q_hex": "0x000000007500",
+    "nonzero": true,
+    "magnitude_raw_v": 0.005180958624223867,
+    "phase_raw_deg": 133.69024699141724,
+    "calibration": {
+      "calibrated": false,
+      "freq_points": 0,
+      "freq_min": null,
+      "freq_max": null,
+      "paths": {
+        "direct": 0,
+        "buffer": 0
+      },
+      "table_file": null,
+      "message": "校准表为空：尚未完成四态校准（run_four_state_calibration）"
+    }
+  },
+  "warnings": [],
+  "checks": {
+    "nonzero": true,
+    "clock_matches": true,
+    "magnitude_valid": true
+  },
+  "passed": true
+}
