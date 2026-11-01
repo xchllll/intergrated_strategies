@@ -49,25 +49,48 @@ function applyStatus(source, calibration) {
 
 function applyReferenceStatus(reference) {
     window.__lastReference = reference || {};
-    const button = document.getElementById('start-btn');
-    if (!button) return;
-    if (reference && reference.running) {
-        button.disabled = true;
-        button.textContent = '正在进行相位对齐...';
-        button.title = reference.message || '短接参考扫频进行中';
-        setNotice(reference.message || '正在进行相位对齐（短接参考扫频），请稍候...', false);
-        return;
-    }
-    if (button.textContent === '正在进行相位对齐...') {
-        button.disabled = false;
-        button.textContent = '开始扫频测量';
-        button.title = '';
-        if (reference && reference.error) {
-            setNotice('相位对齐失败：' + reference.error + '（仍使用旧校准表）', true);
-        } else if (reference && reference.done) {
-            setNotice('相位对齐完成，可以开始扫频。', false);
+    const startBtn = document.getElementById('start-btn');
+    const refBtn = document.getElementById('ref-btn');
+    const running = !!(reference && reference.running);
+    if (startBtn) {
+        if (running) {
+            startBtn.disabled = true;
+            startBtn.textContent = '正在进行相位对齐...';
+            startBtn.title = reference.message || '短接参考扫频进行中';
+        } else if (startBtn.textContent === '正在进行相位对齐...') {
+            startBtn.disabled = false;
+            startBtn.textContent = '开始扫频测量';
+            startBtn.title = '';
         }
     }
+    if (refBtn) {
+        refBtn.disabled = running;
+        refBtn.textContent = running ? '参考扫频中...' : '参考扫频';
+    }
+    if (running) {
+        setNotice(reference.message || '正在进行相位对齐（短接参考扫频），请稍候...', false);
+    } else if (reference && reference.error) {
+        setNotice('相位对齐失败：' + reference.error + '（仍使用旧校准表）', true);
+    } else if (reference && reference.done) {
+        setNotice('相位对齐完成，可以开始扫频。', false);
+    }
+}
+
+async function startReference() {
+    const btn = document.getElementById('ref-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '参考扫频中...'; }
+    try {
+        const response = await fetch('/api/start_reference', { method: 'POST' });
+        const result = await response.json();
+        if (result.status !== 'started') {
+            setNotice(result.msg || '参考扫频未能启动', true);
+        } else {
+            setNotice('参考扫频已启动（请保持短接），约 20 秒...', false);
+        }
+    } catch (error) {
+        setNotice('参考扫频启动失败：' + error.message, true);
+    }
+    loadStatus();
 }
 
 async function startSweep() {
