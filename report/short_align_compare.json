@@ -1,0 +1,103 @@
+{
+  "reference": "..\\tmp\\align_test\\align_ref.json",
+  "rows": [
+    {
+      "m_int": 0,
+      "m_frac": -0.20488576385402493,
+      "int_error_norm": 0.04801178709881179,
+      "raw_db_rms": 0.45842295126702215,
+      "raw_db_max": 2.521098903599551,
+      "raw_phase_rms_deg": 10.382888484188108,
+      "raw_phase_max_deg": 25.831824928424396,
+      "int_db_rms": 0.45842295126702215,
+      "int_db_max": 2.521098903599551,
+      "int_phase_rms_deg": 10.382888484188108,
+      "int_phase_max_deg": 25.831824928424396,
+      "frac_db_rms": 0.45842295126702204,
+      "frac_db_max": 2.521098903599551,
+      "frac_phase_rms_deg": 3.7007126579612217,
+      "frac_phase_max_deg": 13.646715567807405,
+      "label": "align1",
+      "path": "..\\tmp\\align_test\\align1.json",
+      "created": "2026-10-28T22:59:40"
+    },
+    {
+      "m_int": 0,
+      "m_frac": -0.2050271621787407,
+      "int_error_norm": 0.04811345584423035,
+      "raw_db_rms": 0.459754563677006,
+      "raw_db_max": 2.528012698408901,
+      "raw_phase_rms_deg": 10.389526056943874,
+      "raw_phase_max_deg": 25.849846789412936,
+      "int_db_rms": 0.459754563677006,
+      "int_db_max": 2.528012698408901,
+      "int_phase_rms_deg": 10.389526056943874,
+      "int_phase_max_deg": 25.849846789412936,
+      "frac_db_rms": 0.459754563677006,
+      "frac_db_max": 2.5280126984088724,
+      "frac_phase_rms_deg": 3.70205983569841,
+      "frac_phase_max_deg": 13.653553123523153,
+      "label": "align2",
+      "path": "..\\tmp\\align_test\\align2.json",
+      "created": "2026-10-28T23:00:54"
+    },
+    {
+      "m_int": 1,
+      "m_frac": 0.7950845274850842,
+      "int_error_norm": 0.0480082740825446,
+      "raw_db_rms": 0.45689837088373825,
+      "raw_db_max": 2.517688134072017,
+      "raw_phase_rms_deg": 30.506300395990934,
+      "raw_phase_max_deg": 130.8190046104299,
+      "int_db_rms": 0.45689837088373825,
+      "int_db_max": 2.517688134072017,
+      "int_phase_rms_deg": 10.389794611096278,
+      "int_phase_max_deg": 25.88736974244381,
+      "frac_db_rms": 0.4568983708837382,
+      "frac_db_max": 2.517688134072017,
+      "frac_phase_rms_deg": 3.705373840526623,
+      "frac_phase_max_deg": 13.579020525589897,
+      "label": "align3",
+      "path": "..\\tmp\\align_test\\align3.json",
+      "created": "2026-10-28T23:04:29"
+    }
+  ],
+  "pairs": [
+    {
+      "a": "align1",
+      "b": "align2",
+      "m_int": 0,
+      "m_frac": -0.00015968789622757774,
+      "raw_db_rms": 0.0024792416188673416,
+      "raw_phase_rms_deg": 0.0073546584654760995,
+      "int_db_rms": 0.0024792416188673416,
+      "int_phase_rms_deg": 0.0073546584654760995,
+      "frac_db_rms": 0.002479241618866826,
+      "frac_phase_rms_deg": 0.0031251441214657674
+    },
+    {
+      "a": "align1",
+      "b": "align3",
+      "m_int": 1,
+      "m_frac": 0.9999592333961549,
+      "raw_db_rms": 0.008197488002459143,
+      "raw_phase_rms_deg": 40.1558771224064,
+      "int_db_rms": 0.008197488002459369,
+      "int_phase_rms_deg": 0.03446258989087618,
+      "frac_db_rms": 0.008197488002459206,
+      "frac_phase_rms_deg": 0.034197069508830724
+    },
+    {
+      "a": "align2",
+      "b": "align3",
+      "m_int": 1,
+      "m_frac": 1.0001189164706021,
+      "raw_db_rms": 0.008564700826414556,
+      "raw_phase_rms_deg": 40.16253957791282,
+      "int_db_rms": 0.008564700826414747,
+      "int_phase_rms_deg": 0.03403769837671387,
+      "frac_db_rms": 0.008564700826414558,
+      "frac_phase_rms_deg": 0.03433271066823351
+    }
+  ]
+}
