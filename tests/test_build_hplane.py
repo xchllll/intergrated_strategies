@@ -238,6 +238,30 @@ class BuildTests(unittest.TestCase):
     def test_rl_highpass_roundtrip(self):
         self._assert_shunt_roundtrip("rl_highpass", 1000.0, "L", 100e-3)
 
+    def test_mixed_table_is_topology_aware(self):
+        freqs = np.array([20.0, 1000.0, 20000.0])
+        common = {
+            "freq": freqs,
+            "H": np.full(3, 0.5 + 0.0j),
+            "Zin": np.full(3, 10000.0 + 0.0j),
+            "Z": np.zeros(3, dtype=complex),
+            "level": 0.5,
+            "n_points": 3,
+            "sweep": "s",
+        }
+        rows = [
+            {**common, "label": "r", "topology": "resistor", "R": 1000.0, "L": None, "C": None},
+            {**common, "label": "c", "topology": "rc_lowpass", "R": 1000.0, "L": None, "C": 100e-9},
+        ]
+        payload = build_hplane.build_payload(
+            freqs, rows, 10000.0, "test", {}, "test", [], None, "test"
+        )
+        self.assertEqual(payload["meta"]["table_kind"], "topology_aware")
+        self.assertEqual(
+            [s["topology"] for s in payload["meta"]["standards"]],
+            ["resistor", "rc_lowpass"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

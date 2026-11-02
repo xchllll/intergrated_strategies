@@ -1,5 +1,5 @@
 {
-  "note": "2026-11-02: 14-row H-plane table plus 9.9k+0.956nF RC and 6.86k+22mH RL",
+  "note": "2026-11-02 topology-aware table: 16 series + 3 shunt standards",
   "standards": [
     {
       "label": "97k2",
@@ -114,6 +114,30 @@
       "L": "22m",
       "sweep": "20261029-064125-140960",
       "note": "added 2026-11-02: 6.86k + 22mH, latest scan"
+    },
+    {
+      "label": "rc_lp_1k98n1",
+      "topology": "rc_lowpass",
+      "R": "1k",
+      "C": "98.11n",
+      "sweep": "20261029-075359-209478",
+      "note": "2026-11-02: 1k + 98.11nF, RC lowpass"
+    },
+    {
+      "label": "rl_hp_1k100m",
+      "topology": "rl_highpass",
+      "R": "1k",
+      "L": "100m",
+      "sweep": "20261029-075745-125400",
+      "note": "2026-11-02: 1k + 100mH, RL highpass (R series, L shunt)"
+    },
+    {
+      "label": "rc_lp_3k2_9n56",
+      "topology": "rc_lowpass",
+      "R": "3.2k",
+      "C": "9.56n",
+      "sweep": "20261029-075937-558912",
+      "note": "2026-11-02: 3.2k + 9.56nF, RC lowpass"
     }
   ]
 }

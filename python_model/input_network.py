@@ -15,6 +15,12 @@
 
 这样纯电阻的 Z_dut=R（实数），H_disp 在全频段是平的 0°；
 电抗性 DUT 则得到"接一个恒定 R_ref 负载"时的真实频响。
+
+topology-aware 表:
+    meta.table_kind == "topology_aware" 时，meta.standards[*].topology 区分
+    series 行和 shunt 行。deembed/deembed_complex 默认只使用 series 子表；
+    检查 shunt 子表用 zin_at(..., topology="shunt")，避免两类 H→Zin 样本
+    互相污染。
 """
 import json
 import math
@@ -31,11 +37,46 @@ _Z = None
 _L = None
 _RREF = None
 _SHORT_REF = None
+_TABLE_KIND = "series"
+_TOPOLOGIES = []
+
+
+def _is_shunt_topology(topology):
+    return str(topology).strip().lower() in ("rc_lowpass", "rl_highpass")
+
+
+def _topology_group(topology):
+    return "shunt" if _is_shunt_topology(topology) else "series"
+
+
+def _table_indices(topology=None):
+    """Return row indices for a topology-aware table.
+
+    The default display path is series: mixed tables must not let shunt
+    standards contaminate the series H->Zin interpolation.
+    """
+    n = len(_TOPOLOGIES)
+    if _TABLE_KIND != "topology_aware" or not _TOPOLOGIES:
+        return list(range(n))
+    if topology in (None, "", "series"):
+        wanted = "series"
+    elif topology in ("shunt", "all"):
+        wanted = topology
+    else:
+        wanted = _topology_group(topology)
+    if wanted == "all":
+        return list(range(n))
+    idx = [i for i, t in enumerate(_TOPOLOGIES) if _topology_group(t) == wanted]
+    if idx:
+        return idx
+    # A pure-shunt table has no series rows; let the caller inspect it.
+    return list(range(n))
 
 
 def load(path=None):
     """加载 input_network.json；path=None 时在模块旁和 ../data 下查找。"""
     global _TABLE, _F, _LEVELS, _LEVEL_F, _H, _Z, _L, _RREF, _SHORT_REF
+    global _TABLE_KIND, _TOPOLOGIES
     if path is None:
         here = os.path.dirname(os.path.abspath(__file__))
         for cand in (os.path.join(here, "input_network.json"),
@@ -56,6 +97,13 @@ def load(path=None):
     _Z = (np.asarray(d["zin_re"], float) + 1j * np.asarray(d["zin_im"], float))
     _L = np.asarray(d["L_re"], float) + 1j * np.asarray(d["L_im"], float)
     _RREF = float(d.get("R_ref", 10900.0))
+    meta = d.get("meta") or {}
+    _TABLE_KIND = str(meta.get("table_kind") or "series")
+    std_meta = meta.get("standards") or []
+    if std_meta and len(std_meta) == _Z.shape[0]:
+        _TOPOLOGIES = [str(s.get("topology") or "resistor") for s in std_meta]
+    else:
+        _TOPOLOGIES = ["resistor"] * _Z.shape[0]
     _SHORT_REF = None
     sr = d.get("short_ref")
     if sr and sr.get("mag_gain"):
@@ -69,27 +117,34 @@ def _ensure():
         load()
 
 
-def zin_at(freq, level_or_h):
-    """按频率和测量点插值输入阻抗。
+def zin_at(freq, level_or_h, topology=None):
+    """按频率、测量点和 topology 分组插值输入阻抗。
 
-    新表（format 3）存了每条标定曲线的复数 H（h_re/h_im）。此时用
+    新表（format 3/4）存了每条标定曲线的复数 H（h_re/h_im）。此时用
     **H 平面反距离加权**：在 (Re H, Im H) 平面上找与当前测量点最接近的
-    标定行，而不是只按 |H| 插值。这样同一电平下相位不同的 DUT（纯电阻
-    vs 容性 RC）会各自取到正确的 Zin，避免 6.6-6.9 kHz 那种“电平交叉”
-    造成的假陷波。
+    标定行，而不是只按 |H| 插值。
+
+    topology-aware 表会把 series 与 shunt 行分开；默认使用 series 子表，
+    避免 shunt 标准件的 H→Zin 样本污染 series DUT 的去嵌入。需要检查
+    shunt 子表时显式传 topology="shunt" 或具体 topology 名。
     旧表没有 h_re/h_im 时退回原来的 |H| 一维插值。
     """
     _ensure()
     lf = np.log(max(freq, 1e-9))
     ltab = np.log(_F)
-    if _H is not None:
+    idx = _table_indices(topology)
+    H = _H[idx] if _H is not None else None
+    Z = _Z[idx]
+    level_f = _LEVEL_F[idx] if _LEVEL_F is not None else None
+    levels = _LEVELS[idx]
+    if H is not None:
         h = complex(level_or_h)
         hs, zs = [], []
-        for i in range(_Z.shape[0]):
-            hr = float(np.interp(lf, ltab, _H[i].real))
-            hi = float(np.interp(lf, ltab, _H[i].imag))
-            zr = float(np.interp(lf, ltab, _Z[i].real))
-            zi = float(np.interp(lf, ltab, _Z[i].imag))
+        for i in range(Z.shape[0]):
+            hr = float(np.interp(lf, ltab, H[i].real))
+            hi = float(np.interp(lf, ltab, H[i].imag))
+            zr = float(np.interp(lf, ltab, Z[i].real))
+            zi = float(np.interp(lf, ltab, Z[i].imag))
             hs.append(complex(hr, hi))
             zs.append(complex(zr, zi))
         hs = np.array(hs)
@@ -99,12 +154,12 @@ def zin_at(freq, level_or_h):
         return complex(np.sum(w * zs) / np.sum(w))
 
     level = abs(level_or_h)
-    if _LEVEL_F is not None:
+    if level_f is not None:
         us, zs = [], []
-        for i in range(_Z.shape[0]):
-            ui = float(np.interp(lf, ltab, _LEVEL_F[i]))
-            zr = float(np.interp(lf, ltab, _Z[i].real))
-            zi = float(np.interp(lf, ltab, _Z[i].imag))
+        for i in range(Z.shape[0]):
+            ui = float(np.interp(lf, ltab, level_f[i]))
+            zr = float(np.interp(lf, ltab, Z[i].real))
+            zi = float(np.interp(lf, ltab, Z[i].imag))
             us.append(ui)
             zs.append(complex(zr, zi))
         order = np.argsort(us)
@@ -118,13 +173,13 @@ def zin_at(freq, level_or_h):
         t = (level - us[j]) / (us[j + 1] - us[j])
         return complex(zs[j] * (1 - t) + zs[j + 1] * t)
 
-    z = np.array([np.interp(lf, ltab, row) for row in _Z])
-    if level <= _LEVELS[0]:
+    z = np.array([np.interp(lf, ltab, row) for row in Z])
+    if level <= levels[0]:
         return complex(z[0])
-    if level >= _LEVELS[-1]:
+    if level >= levels[-1]:
         return complex(z[-1])
-    j = int(np.searchsorted(_LEVELS, level) - 1)
-    t = (level - _LEVELS[j]) / (_LEVELS[j + 1] - _LEVELS[j])
+    j = int(np.searchsorted(levels, level) - 1)
+    t = (level - levels[j]) / (levels[j + 1] - levels[j])
     return complex(z[j] * (1 - t) + z[j + 1] * t)
 
 
@@ -134,9 +189,23 @@ def crosstalk_at(freq):
                    np.interp(np.log(max(freq, 1e-9)), np.log(_F), _L.imag))
 
 
-def deembed_complex(h_cal, freq, use_crosstalk=False):
-    """输入: 短接校准后的复数 H；输出: 重新嵌入恒定 R_ref 后的复数 H。"""
+def deembed_complex(h_cal, freq, use_crosstalk=False, topology="series"):
+    """输入: 短接校准后的复数 H；输出: 重新嵌入恒定 R_ref 后的复数 H。
+
+    topology="series" 时只使用 series 子表；这是 dashboard 当前默认路径。
+    shunt DUT 的显示需要 DUT 网络参数，不能仅凭 H 平面表唯一反解，因此这里
+    不静默套用 series 公式。
+    """
+    if topology not in (None, "", "series"):
+        raise ValueError(
+            "deembed_complex 只实现 series DUT；shunt 表请用 zin_at(..., "
+            "topology='shunt') 检查输入网络，或提供 DUT 网络参数做专门反解"
+        )
     _ensure()
+    if _TABLE_KIND == "shunt":
+        raise ValueError(
+            "当前加载的是 shunt-only H 平面表；deembed_complex 需要 series 子表"
+        )
     h = complex(h_cal)
     # 极低阻/短接：|H|≈1，去嵌入只会放大噪声，直接返回。
     # 0.999 仍能保护真正的短接（|H|=1.000），但让 |H|=0.99~0.999 的近短路
@@ -149,18 +218,18 @@ def deembed_complex(h_cal, freq, use_crosstalk=False):
     A = h * (1 + L) - L
     if abs(A) < 1e-9:
         return 0j
-    zin = zin_at(freq, h)
+    zin = zin_at(freq, h, topology=topology)
     z_dut = zin * (1 - A) / A
     if abs(z_dut) > 1e12:
         return 0j
     return _RREF / (z_dut + _RREF)
 
 
-def deembed(mag, phase_deg, freq, use_crosstalk=False):
+def deembed(mag, phase_deg, freq, use_crosstalk=False, topology="series"):
     """输入: 短接校准后的幅值/相位；输出: 去嵌入后的 (mag, phase_deg)。"""
     h = mag * complex(math.cos(math.radians(phase_deg)),
                       math.sin(math.radians(phase_deg)))
-    hd = deembed_complex(h, freq, use_crosstalk=use_crosstalk)
+    hd = deembed_complex(h, freq, use_crosstalk=use_crosstalk, topology=topology)
     return abs(hd), math.degrees(math.atan2(hd.imag, hd.real))
 
 
@@ -176,6 +245,10 @@ def apply_short_change(short_cur):
     """
     global _H, _Z, _LEVEL_F, _LEVELS, _RREF
     _ensure()
+    if _TABLE_KIND in ("topology_aware", "shunt"):
+        # 短接旋转的 Z_old/Z_new 推导只对 series 行成立；shunt 行必须按
+        # 各自 topology 重建，不能在这里静默套用 series 公式。
+        return False
     if _SHORT_REF is None or _H is None:
         return False
     gref, oref = _SHORT_REF
@@ -220,3 +293,15 @@ def parameters():
     """返回拟合的等效网络参数（供报告/网页显示）。"""
     _ensure()
     return dict(_TABLE.get("rlc", {}))
+
+
+def table_kind():
+    """Return series / shunt / topology_aware for the loaded table."""
+    _ensure()
+    return _TABLE_KIND
+
+
+def topologies():
+    """Return the per-row topology list of the loaded table."""
+    _ensure()
+    return list(_TOPOLOGIES)

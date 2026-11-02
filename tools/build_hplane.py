@@ -24,6 +24,10 @@
 `R_ref` 负载下的真实分压传递函数作参考，而不是强行套 series 的
 `R_ref/(Z+R_ref)`。
 
+两类行可以放在同一张 topology-aware 表里：`meta.table_kind` 会标成
+`topology_aware`，校验和运行时都按 topology 分组，避免两类 `H→Zin`
+样本互相污染。
+
 本脚本把原来散落在 `build_hplane*.py`、`check_hplane.py` 里的硬编码路径/
 sweep_id/参数收敛成一个可复现的 CLI：
 
@@ -675,6 +679,13 @@ def build_payload(
 ) -> dict:
     n = len(cal_freqs)
     base_table = base_table or {}
+    shunt_flags = {is_shunt_topology(row.get("topology", "")) for row in rows}
+    if len(shunt_flags) > 1:
+        table_kind = "topology_aware"
+    elif shunt_flags == {True}:
+        table_kind = "shunt"
+    else:
+        table_kind = "series"
     l_re = base_table.get("L_re") or [0.0] * n
     l_im = base_table.get("L_im") or [0.0] * n
     if len(l_re) != n or len(l_im) != n:
@@ -711,6 +722,7 @@ def build_payload(
         "rlc": base_table.get("rlc", {}),
         "meta": {
             "rows": labels,
+            "table_kind": table_kind,
             "note": note,
             "created": datetime.now().astimezone().isoformat(timespec="seconds"),
             "source": "tools/build_hplane.py",
@@ -764,29 +776,73 @@ def _deembed(h: complex, freq: float, payload: dict, f_grid: np.ndarray, h_rows:
 def validate_payload(payload: dict, rows: Sequence[dict]) -> List[dict]:
     """用建好的表反解同一批标准件，和理论 H_disp 对比。
 
-    注意：这是 in-sample 自洽检查；它不能代替独立标准件/域外测试。
+    series 行：用 series 子表校验 H_disp；
+    shunt 行：没有统一的 series Z_dut，校验表插值出来的 Zin 与已知 Zin。
+    topology-aware 表会先按 topology group 取子表，避免 series/shunt 的
+    H→Zin 样本互相污染。
+    这是 in-sample 自洽检查；它不能代替独立标准件/域外测试。
     """
     f_grid, h_rows, z_rows = _table_arrays(payload)
+    series_idx = [
+        i for i, row in enumerate(rows)
+        if not is_shunt_topology(row.get("topology", ""))
+    ]
+    shunt_idx = [
+        i for i, row in enumerate(rows)
+        if is_shunt_topology(row.get("topology", ""))
+    ]
+    series_arrays = (
+        f_grid,
+        h_rows[series_idx] if series_idx else np.empty((0, len(f_grid))),
+        z_rows[series_idx] if series_idx else np.empty((0, len(f_grid))),
+    )
+    shunt_arrays = (
+        f_grid,
+        h_rows[shunt_idx] if shunt_idx else np.empty((0, len(f_grid))),
+        z_rows[shunt_idx] if shunt_idx else np.empty((0, len(f_grid))),
+    )
+
     out = []
     for row in rows:
-        h_disp = np.asarray(
-            [
-                _deembed(h, f, payload, f_grid, h_rows, z_rows)
-                for h, f in zip(row["H"], f_grid)
-            ]
-        )
-        h_model = reference_transfer(f_grid, row, payload["R_ref"])
-        db = 20.0 * np.log10(np.abs(h_disp) + 1e-30) - 20.0 * np.log10(
-            np.abs(h_model) + 1e-30
-        )
-        dphi = (
-            (
-                np.degrees(np.angle(h_disp))
-                - np.degrees(np.angle(h_model))
-                + 180.0
+        if is_shunt_topology(row.get("topology", "")):
+            _, hs, zs = shunt_arrays
+            zin_est = np.asarray(
+                [
+                    _zin_at(f, h, f_grid, hs, zs)
+                    for h, f in zip(row["H"], f_grid)
+                ]
             )
-            % 360.0
-        ) - 180.0
+            db = 20.0 * np.log10(np.abs(zin_est) + 1e-30) - 20.0 * np.log10(
+                np.abs(row["Zin"]) + 1e-30
+            )
+            dphi = (
+                (
+                    np.degrees(np.angle(zin_est))
+                    - np.degrees(np.angle(row["Zin"]))
+                    + 180.0
+                )
+                % 360.0
+            ) - 180.0
+        else:
+            _, hs, zs = series_arrays
+            h_disp = np.asarray(
+                [
+                    _deembed(h, f, payload, f_grid, hs, zs)
+                    for h, f in zip(row["H"], f_grid)
+                ]
+            )
+            h_model = reference_transfer(f_grid, row, payload["R_ref"])
+            db = 20.0 * np.log10(np.abs(h_disp) + 1e-30) - 20.0 * np.log10(
+                np.abs(h_model) + 1e-30
+            )
+            dphi = (
+                (
+                    np.degrees(np.angle(h_disp))
+                    - np.degrees(np.angle(h_model))
+                    + 180.0
+                )
+                % 360.0
+            ) - 180.0
         out.append(
             {
                 "label": row["label"],
