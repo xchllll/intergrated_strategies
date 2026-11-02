@@ -890,11 +890,11 @@ periods(f) = clamp(1000·f/fs, 10, 1000)
 | Dashboard 启动 | 23/31/36 s + 可能重校准 | 只启动 Flask，不再加载 PL | 启动路径大幅简化 | `short_repeatability_20261102.md`、`run_dashboard.py` |
 | 合成数据分类准确率 | 约 71% | — | — | `collaboration_log2.md` |
 | 实测数据分类准确率（80/20） | — | 100.00%（DT/MLP） | — | `report/ml_training_note.md` |
-| 逻辑资源 | 656 LUT / 268 FF / 2 DSP（含 `sweep_ctrl`） | 同一量级；`sweep_ctrl` 已移除 | 资源不是瓶颈 | `report/resource_utilization.png` |
+| 逻辑资源（`top` 层级） | 656 LUT / 268 FF / 2 DSP（含 `sweep_ctrl`） | 同一量级；`sweep_ctrl` 已移除 | 资源不是瓶颈；wrapper 层级见 4.9.1 | `report/resource_utilization.png` |
 
 ### 4.9 资源与时序对比
 
-> 这张表是“优化前”的实测综合结果（截图中包含 `u_sweep_ctrl`）。当前 `top.v` 已不再实例化 `sweep_ctrl`，但仓库没有重新综合后的报告；因此当前列只能给“源码变化”，不能冒充实测值。
+> 这张表是“优化前”的 `top` 层级实测综合结果（截图中包含 `u_sweep_ctrl`）。当前 `top.v` 已不再实例化 `sweep_ctrl`；2026-11-03 新增的 `vivado_design_1_wrapper_*` 截图是 `design_1_wrapper` 层级（含 PS/AXI/BD）的综合/实现结果，见 4.9.1。两个层级不能直接相减比较。
 
 | 资源/时序 | 旧综合（含 `sweep_ctrl`） | 当前源码变化 | 说明 |
 |---|---:|---|---|
@@ -910,7 +910,7 @@ periods(f) = clamp(1000·f/fs, 10, 1000)
 
 资源结论：
 
-- 设计逻辑占用 < 1.5%，DSP 2 个，IOB 82% 主要是板级引脚；**资源不是瓶颈**，没有必要为了省 LUT 牺牲测量质量。
+- 旧 `top` 层级逻辑占用 < 1.5%，DSP 2 个，IOB 82% 主要是板级引脚；`design_1_wrapper` 层级（含 PS/AXI/BD）LUT 3.33%、FF 2.73%，仍远低于器件容量；**资源不是瓶颈**，没有必要为了省 LUT 牺牲测量质量。
 - 旧综合里 DDS 占 478 LUT/81 FF/2 DSP，demod 占 97 LUT/96 FF，`sweep_ctrl` 占 72 LUT/75 FF；当前把逐点调度移到 PS，PL 只保留单点测量，逻辑更“窄”，但新增了结果锁存和启动对齐，FF 略增。
 - 真正的“资源优化”不是把 LUT 从 656 降到 600，而是**把不需要硬件确定性的扫频调度移到 PS**，换来 240 点任意对数频率、每点不同窗长、进度/超时/校准插入能力。
 
@@ -918,7 +918,29 @@ periods(f) = clamp(1000·f/fs, 10, 1000)
 
 ![历史时序汇总截图](./timing_summary.png)
 
-> 两张截图来自历史综合（Vivado 2025.2，`xc7z020clg400-1`），用于说明资源/时序量级；当前 RTL 已删除 `u_sweep_ctrl` 并新增启动对齐/锁存，正式数值应以重新综合后的报告为准。
+> 两张截图来自历史 `top` 层级综合（Vivado 2025.2，`xc7z020clg400-1`），用于说明资源/时序量级；当前 RTL 已删除 `u_sweep_ctrl` 并新增启动对齐/锁存。
+
+#### 4.9.1 `design_1_wrapper` 层级的新截图（2026-11-03 补充）
+
+| 指标 | `design_1_wrapper`（synth_1） | 说明 |
+|---|---:|---|
+| LUT | 1772（3.33%） | 含 Zynq PS、AXI SmartConnect、4 个 AXI GPIO、BD |
+| FF | 2909（2.73%） | 同上 |
+| BRAM | 1（0.71%） | RAMB18 |
+| DSP | 2（0.91%） | 16×16 乘加 |
+| IO | 7（5.60%） | 板级音频/I2C 等 |
+| WNS / WHS / WPWS | 1.217 / 0.045 / 4.020 ns | 综合时序，约束满足 |
+| 功耗 | 1.686 W（动态 1.547 W，静态 0.140 W） | implemented，25°C 环境，结温 44.4°C |
+
+这几张截图回答的是“**wrapper 层级整体占多少**”，而 4.9 上表回答的是“**top 模块自身占多少**”，不是同一口径。wrapper 层级包含 PS/AXI/BD，所以 LUT/FF 必然更大；不能拿 1772 和 656 直接算“优化前后变化”。
+
+![design_1 Block Design（PS + AXI SmartConnect + 4 个 AXI GPIO + top）](./vivado_design_1_block_design.png)
+
+![design_1_wrapper 综合资源汇总（LUT/FF/BRAM/DSP/IO）](./vivado_design_1_wrapper_utilization_summary.png)
+
+![design_1_wrapper 综合时序汇总（WNS/WHS/WPWS）](./vivado_design_1_wrapper_synth_timing.png)
+
+其余截图：`vivado_design_1_wrapper_elaborated.png`（wrapper 顶层 I/O）、`vivado_design_1_wrapper_utilization_hierarchy.png`（资源层级）、`vivado_design_1_wrapper_implemented_device.png`（实现后器件视图）、`vivado_design_1_wrapper_power.png`（功耗分析）。
 
 ### 4.10 代价与权衡
 

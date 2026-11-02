@@ -244,7 +244,21 @@ intergrated_strategies/
 │  ├─ build_hplane.py           # 短接表 + 标准件扫频 + 万用表参数 → H 平面表
 │  └─ hplane_standards.example.json  # 14 只标准件的实测参数/sweep_id 模板
 ├─ tests/                       # 无硬件单测 / 资产检查 / 音频分析 / H 平面建表测试
-├─ report/                      # 设计报告、性能指标、资源/时序、H 平面误差、混淆矩阵
+├─ report/                      # 设计报告、性能指标、Vivado 截图、H 平面误差、混淆矩阵
+│  ├─ DESIGN_REPORT.md          # 综合设计报告（背景/原理/划分/优化/协作/技能/复现）
+│  ├─ performance_metrics.md    # 性能指标汇总
+│  ├─ vivado_design_1_block_design.png        # design_1 Block Design：PS + AXI GPIO + top
+│  ├─ vivado_design_1_wrapper_elaborated.png  # design_1_wrapper 展开后的顶层 I/O
+│  ├─ vivado_design_1_wrapper_synth_timing.png # 综合后时序（WNS/WHS/WPWS）
+│  ├─ vivado_design_1_wrapper_utilization_hierarchy.png # 资源层级
+│  ├─ vivado_design_1_wrapper_utilization_summary.png   # LUT/FF/BRAM/DSP/IO 汇总
+│  ├─ vivado_design_1_wrapper_implemented_device.png    # 实现后器件视图
+│  ├─ vivado_design_1_wrapper_power.png       # 功耗分析
+│  ├─ resource_utilization.png  # 历史资源截图（含 sweep_ctrl）
+│  ├─ timing_summary.png        # 历史时序截图
+│  ├─ hplane_*.md/png           # H 平面误差、校验与曲线
+│  ├─ short_*.md/png/csv/json   # 短接重复性/对齐
+│  └─ confusion_matrix.png      # 混淆矩阵
 ├─ docs/                       # 环境、寄存器映射、最低验收
 ├─ skill/                      # 开发过程中沉淀的可复用经验与去嵌入方法
 ├─ run_dashboard.py            # 只启动 Flask，附着常驻 PL/I2S
