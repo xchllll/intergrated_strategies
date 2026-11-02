@@ -53,6 +53,16 @@ _SHORT_CAL_STATE = {
     "result": None,
 }
 
+_SWEEP_LOCK = threading.Lock()
+_SWEEP_STATE = {
+    "running": False,
+    "done": False,
+    "error": None,
+    "message": "",
+    "progress": 0,
+    "total": 0,
+}
+
 
 def _runtime_source(mode: str = "rtl") -> dict:
     if platform.system() == "Windows":
@@ -203,6 +213,21 @@ def _short_cal_set(**kwargs):
         _SHORT_CAL_STATE.update(kwargs)
 
 
+def _sweep_status():
+    with _SWEEP_LOCK:
+        return dict(_SWEEP_STATE)
+
+
+def _sweep_is_running():
+    with _SWEEP_LOCK:
+        return bool(_SWEEP_STATE.get("running"))
+
+
+def _sweep_set(**kwargs):
+    with _SWEEP_LOCK:
+        _SWEEP_STATE.update(kwargs)
+
+
 def _run_short_calibration_bg(repeat: int):
     """Measure the short and hand raw sweeps to calibrate_path.py.
 
@@ -324,6 +349,8 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
         data["phase_deg"].append(phase_cal)
         data["mag_v_raw"].append(mag)
         data["phase_deg_raw"].append(phase)
+        _sweep_set(progress=index + 1,
+                   message="扫频中（%d/%d）..." % (index + 1, len(freqs)))
 
     data["phase_valid"] = [1 if cal.phase_is_valid(v) else 0
                            for v in data["mag_v_raw"]]
@@ -437,6 +464,7 @@ def status():
             "calibration": calibration,
             "points": (AUDIO_SWEEP_POINTS if source["mode"] == "pynq_audio_loopback" else SWEEP_POINTS),
             "short_calibration": _short_cal_status(),
+            "sweep": _sweep_status(),
         }
     )
 
@@ -456,6 +484,9 @@ def api_start_short_calibration():
     if _short_cal_running():
         return jsonify({"status": "busy",
                         "msg": "短接校准正在进行，请稍候"}), 409
+    if _sweep_is_running():
+        return jsonify({"status": "busy",
+                        "msg": "扫频测量正在进行，请完成后再校准"}), 409
     try:
         _ensure_rtl_design()
     except Exception as exc:
@@ -507,6 +538,9 @@ def start_sweep():
     if _short_cal_running():
         return jsonify({"status": "busy",
                         "msg": "正在进行一键短接校准，请完成后再测量"}), 409
+    if _sweep_is_running():
+        return jsonify({"status": "busy",
+                        "msg": "上一次扫频仍在进行，请稍候"}), 409
     payload = request.get_json(silent=True) or {}
     
     # 【修复 1】严格白名单校验
@@ -522,6 +556,9 @@ def start_sweep():
         cal_path = "buffer"
 
     source = _runtime_source(mode)
+    total = AUDIO_SWEEP_POINTS if source["mode"] == "pynq_audio_loopback" else SWEEP_POINTS
+    _sweep_set(running=True, done=False, error=None, progress=0,
+               total=total, message="准备扫频...")
 
     try:
         if source["mode"] == "demo_csv":
@@ -529,10 +566,13 @@ def start_sweep():
             data = _load_demo_csv()
             calibration = {"calibrated": False, "message": "演示 CSV 未经过本次硬件校准"}
             sweep_warnings = []
+            _sweep_set(progress=total, message="扫频完成")
         else:
             data, calibration, sweep_warnings = _run_hardware_sweep(mode, cal_path)
             
     except Exception as exc:
+        _sweep_set(running=False, error=str(exc),
+                   message="扫频失败: %s" % exc)
         app.logger.exception("扫频失败")
         return jsonify({"status": "error", "msg": str(exc)}), 500
 
@@ -561,7 +601,9 @@ def start_sweep():
         response["warnings"].append("当前展示的是演示 CSV，不是 PYNQ 硬件测量结果。")
     if source["is_real"] and not calibration.get("calibrated"):
         response["warnings"].append("校准表为空或缺少对应路径；曲线为未校准原始测量。")
-        
+
+    _sweep_set(running=False, done=True, progress=total,
+               message="扫频完成（%d/%d）" % (total, total))
     return jsonify(response)
 
 

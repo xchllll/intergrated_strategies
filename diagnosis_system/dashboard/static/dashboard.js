@@ -13,6 +13,7 @@ async function loadStatus() {
         if (result.status === 'success') {
             applyStatus(result.source, result.calibration);
             applyShortCalibrationStatus(result.short_calibration);
+            applySweepStatus(result.sweep);
         }
     } catch (error) {
         setNotice('无法读取后端状态：' + error.message, true);
@@ -64,7 +65,8 @@ function applyShortCalibrationStatus(shortCal) {
         }
     }
     if (calBtn) {
-        calBtn.disabled = running;
+        const sweepRunning = !!(window.__lastSweep && window.__lastSweep.running);
+        calBtn.disabled = running || sweepRunning;
         calBtn.textContent = running ? '短接校准中...' : '一键短接校准';
     }
     if (running) {
@@ -78,9 +80,36 @@ function applyShortCalibrationStatus(shortCal) {
     }
 }
 
+function applySweepStatus(sweep) {
+    window.__lastSweep = sweep || {};
+    const startBtn = document.getElementById('start-btn');
+    const calBtn = document.getElementById('cal-btn');
+    const running = !!(sweep && sweep.running);
+    if (running) {
+        if (startBtn) {
+            startBtn.disabled = true;
+            startBtn.textContent = '扫频中 ' + (sweep.progress || 0) + '/' +
+                                   (sweep.total || 240);
+            startBtn.title = sweep.message || '扫频测量进行中';
+        }
+        if (calBtn) calBtn.disabled = true;
+        setNotice(sweep.message || ('扫频中 ' + (sweep.progress || 0) + '/' +
+                  (sweep.total || 240) + '...'), false);
+    } else if (sweep && sweep.error) {
+        setNotice('扫频失败：' + sweep.error, true);
+    } else if (sweep && sweep.done) {
+        setNotice('扫频完成（' + (sweep.total || 240) + '/' +
+                  (sweep.total || 240) + '）。', false);
+    }
+}
+
 function openShortCalibration() {
     if (window.__lastShortCal && window.__lastShortCal.running) {
         setNotice('短接校准正在进行，请稍候...', false);
+        return;
+    }
+    if (window.__lastSweep && window.__lastSweep.running) {
+        setNotice('扫频测量正在进行，请稍候...', false);
         return;
     }
     const modal = document.getElementById('cal-modal');
@@ -137,14 +166,27 @@ document.addEventListener('keydown', (event) => {
 
 async function startSweep() {
     const button = document.getElementById('start-btn');
+    const calBtn = document.getElementById('cal-btn');
 
     if (window.__lastShortCal && window.__lastShortCal.running) {
         setNotice('正在进行一键短接校准，请稍候...', false);
         return;
     }
+    if (window.__lastSweep && window.__lastSweep.running) {
+        setNotice('扫频测量正在进行，请稍候...', false);
+        return;
+    }
 
+    window.__lastSweep = {
+        running: true,
+        done: false,
+        progress: 0,
+        total: 240,
+        message: '准备扫频...'
+    };
     button.disabled = true;
-    button.textContent = '扫频中...';
+    button.textContent = '扫频中 0/240';
+    if (calBtn) calBtn.disabled = true;
     document.getElementById('ai-topo').textContent = '计算中...';
     document.getElementById('ai-conf').textContent = '--%';
     setNotice('正在读取数据并计算 Bode 曲线...', false);
@@ -188,8 +230,15 @@ async function startSweep() {
         document.getElementById('ai-topo').textContent = '未完成';
         document.getElementById('ai-conf').textContent = '--%';
     } finally {
+        window.__lastSweep = Object.assign({}, window.__lastSweep, {
+            running: false
+        });
         button.disabled = false;
         button.textContent = '开始扫频测量';
+        button.title = '';
+        if (calBtn && !(window.__lastShortCal && window.__lastShortCal.running)) {
+            calBtn.disabled = false;
+        }
     }
 }
 

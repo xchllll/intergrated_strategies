@@ -47,4 +47,6 @@ if __name__ == "__main__":
         except Exception as exc:
             print("[startup] WARNING: AXI GPIO init failed: %s" % exc,
                   flush=True)
-    app_mod.app.run(host="0.0.0.0", port=5000, debug=False, threaded=False)
+    # threaded=True is required for /api/status to be served while a synchronous
+    # /api/start_sweep request is measuring (the UI shows x/240 progress).
+    app_mod.app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
