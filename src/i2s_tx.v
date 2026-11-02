@@ -3,6 +3,7 @@
 module i2s_tx (
     input  wire        clk,
     input  wire        rst_n,
+    input  wire        enable,
     input  wire [15:0] audio_data_L,
     input  wire [15:0] audio_data_R,
     output reg         bclk,
@@ -16,12 +17,13 @@ module i2s_tx (
     reg [15:0] audio_latched;
 
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
+        if (!rst_n || !enable) begin
             clk_div     <= 5'd0;
             bit_index   <= 5'd0;
             bclk_fall_d <= 1'b0;
-            // Left channel starts immediately after reset. Preload it so the
-            // first transmitted frame is not a zero sample.
+            // 未使能时把 I2S 输出钉在确定状态：BCLK/SDATA 为低，LRCLK 为高
+            // （左声道帧）。第一次 enable 后从该状态开始，Codec 每次看到的
+            // 第一个 LRCLK/BCLK 沿一致，跨进程短接相位才不会漂。
             audio_latched <= audio_data_L;
             bclk        <= 1'b0;
             lrclk       <= 1'b1;

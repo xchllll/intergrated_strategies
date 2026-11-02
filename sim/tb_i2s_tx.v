@@ -4,6 +4,7 @@ module tb_i2s_tx;
 
     reg        clk;
     reg        rst_n;
+    reg        enable;
     reg [15:0] audio_data_L;
     reg [15:0] audio_data_R;
 
@@ -24,6 +25,7 @@ module tb_i2s_tx;
     i2s_tx dut (
         .clk          (clk),
         .rst_n        (rst_n),
+        .enable       (enable),
         .audio_data_L (audio_data_L),
         .audio_data_R (audio_data_R),
         .bclk         (bclk),
@@ -102,11 +104,13 @@ module tb_i2s_tx;
         last_lrclk_edge = 0;
 
         rst_n        = 1'b0;
+        enable       = 1'b0;
         audio_data_L = 16'hAAAA;
         audio_data_R = 16'h5555;
 
         #100;
         rst_n = 1'b1;
+        enable = 1'b1;   // 释放 I2S，开始产生 BCLK/LRCLK
 
         // 仿真 2ms，约包含 97 个完整 lrclk 周期。
         #2_000_000;

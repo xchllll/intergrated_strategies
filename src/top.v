@@ -37,6 +37,7 @@ module top (
     wire signed [15:0] rx_right_data;
     wire signed [15:0] rx_mix_data;      // L+R（饱和），夹具接 Tip 或 Ring 都能测
     wire               rx_data_valid;
+    reg                i2s_started;      // 首次 ps_start 后释放 I2S
 
     // ------------------------------------------------------------------
     // 结果锁存器（屏蔽软件时序竞争，例如 start 被误拉低导致状态机退回
@@ -58,6 +59,7 @@ module top (
 
     i2s_tx u_i2s_tx (
         .clk(clk), .rst_n(sys_rst_n), // 用内部复位
+        .enable(i2s_started),          // 首次 ps_start 后释放 I2S
         .audio_data_L(wire_dds_sine), .audio_data_R(wire_dds_sine), 
         .bclk(i2s_bclk), .lrclk(i2s_lrclk), .sdata(i2s_sdata)
     );
@@ -83,16 +85,38 @@ module top (
     localparam FLUSH = 2'd2;   // 积分窗满后多停一拍，把最后一个 mix 压进 acc
     localparam DONE = 2'd3;
 
+    // ★ 跨进程 I2S 启动对齐：
+    //   上电后 I2S TX 保持关闭，直到第一次 ps_start。PS 先完成 Codec 配置，
+    //   再由第一次测量释放 I2S；TX 从固定状态（LRCLK=1、左帧）开始，并等待
+    //   1024 个完整采样帧后才允许状态机启动。这样每次进程重启，Codec 看到的
+    //   第一个 BCLK/LRCLK 沿和第一个有效帧都相同，不再需要每次做短接参考扫频。
+    reg [9:0]  i2s_warmup;
+    wire       i2s_ready = i2s_started && (i2s_warmup == 10'd1023);
+
+    always @(posedge clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            i2s_started <= 1'b0;
+            i2s_warmup  <= 10'd0;
+        end else begin
+            if (!i2s_started && ps_start && (state == IDLE))
+                i2s_started <= 1'b1;
+
+            if (i2s_started && (i2s_warmup != 10'd1023) && rx_data_valid)
+                i2s_warmup <= i2s_warmup + 1'b1;
+        end
+    end
+
     // ★ 启动对齐到 I2S 采样边界：
     //   ps_start 来自 AXI GPIO，可以落在 2048 拍帧内的任意位置。原实现
     //   直接用它启动状态机/释放 DDS，于是“DDS 复位 → 第一个 rx_data_valid”
     //   的拍数在 0~2048 之间随机，第一个积分样本的参考相位就带一个
     //   0~1 个采样（20.48 us；20 kHz 时约 147°）的随机偏移。
-    //   这里先把启动请求锁存，等下一个 rx_data_valid 再真正启动：
-    //   DDS 总在采样边界释放，第一个积分样本固定在其后的下一个采样边界，
-    //   相位基准跨进程/跨次测量一致，标定表才有可复现的意义。
+    //   这里先把启动请求锁存，等 I2S 暖机完成且下一个 rx_data_valid 再真正
+    //   启动：DDS 总在采样边界释放，第一个积分样本固定在其后的下一个采样
+    //   边界，相位基准跨进程/跨次测量一致，标定表才有可复现的意义。
     reg start_pending;
-    wire start_here = start_pending && rx_data_valid && (state == IDLE);
+    wire start_here = start_pending && ps_start && rx_data_valid
+                   && (state == IDLE) && i2s_ready;
 
     always @(posedge clk or negedge sys_rst_n) begin
         if (!sys_rst_n)
