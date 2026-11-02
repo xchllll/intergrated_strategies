@@ -9,10 +9,20 @@
 
     H_row(f) = raw_row(f) * H_short^-1(f)          # 短接校准后
     Zin(f)   = H_row(f) * Z_dut(f) / (1 - H_row(f))
-    Z_dut(f) = R + jwL + 1/(jwC)                   # 标准件的已知阻抗
+    Z_dut(f) = R + jwL + 1/(jwC)                   # series 标准件的已知阻抗
 
 其中 `raw_row` 是网页扫频保存的未校准复数响应，`H_short` 是同一进程/同一夹具
 的短接校准表。标准件的 R/L/C 由万用表/LCR 表实测，不能用标称值代替。
+
+除 series 标准件外，脚本还支持两种三端 shunt 标准件：
+
+    rc_lowpass  : R 串联，C 并联到地，输出取 C 上的节点
+    rl_highpass : R 串联，L 并联到地，输出取 L 上的节点
+
+对这两种拓扑，`Zin` 不能再用串联公式反解。脚本按分压关系先求并联节点阻抗
+`Zp = H·R/(1-H)`，再由 `Zp = Zshunt || Zin` 反解 `Zin`。校验时用标准件在
+`R_ref` 负载下的真实分压传递函数作参考，而不是强行套 series 的
+`R_ref/(Z+R_ref)`。
 
 本脚本把原来散落在 `build_hplane*.py`、`check_hplane.py` 里的硬编码路径/
 sweep_id/参数收敛成一个可复现的 CLI：
@@ -127,7 +137,7 @@ def parse_value(text, kind: str = "") -> float:
 
 
 def normalize_topology(value: str, has_l: bool, has_c: bool) -> str:
-    """把 topology 别名归一化；为空时按 L/C 是否存在推断。"""
+    """把 topology 别名归一化；为空时按 L/C 是否存在推断为 series。"""
     text = (value or "").strip().lower().replace("-", "_")
     aliases = {
         "r": "resistor",
@@ -140,6 +150,14 @@ def normalize_topology(value: str, has_l: bool, has_c: bool) -> str:
         "series_rl": "series_rl",
         "rlc": "series_rlc",
         "series_rlc": "series_rlc",
+        "rc_lowpass": "rc_lowpass",
+        "rc_lp": "rc_lowpass",
+        "lowpass_rc": "rc_lowpass",
+        "rc_low": "rc_lowpass",
+        "rl_highpass": "rl_highpass",
+        "rl_hp": "rl_highpass",
+        "highpass_rl": "rl_highpass",
+        "rl_high": "rl_highpass",
     }
     if text in ("", "auto"):
         if has_l and has_c:
@@ -151,8 +169,8 @@ def normalize_topology(value: str, has_l: bool, has_c: bool) -> str:
         return "resistor"
     if text not in aliases:
         raise ValueError(
-            "未知 topology %r（可选：resistor / series_rc / series_rl / series_rlc）"
-            % value
+            "未知 topology %r（可选：resistor / series_rc / series_rl / "
+            "series_rlc / rc_lowpass / rl_highpass）" % value
         )
     return aliases[text]
 
@@ -196,6 +214,16 @@ def _standard_from_dict(item: Dict[str, object], source: str) -> dict:
         raise ValueError("%s (%s): series_rl 需要 L、且不能有 C" % (source, label))
     if topology == "series_rlc" and (l is None or c is None):
         raise ValueError("%s (%s): series_rlc 需要 L 和 C" % (source, label))
+    if topology == "rc_lowpass" and (c is None or l is not None):
+        raise ValueError(
+            "%s (%s): rc_lowpass 需要 C、且不能有 L（R 为串联电阻，C 为并联到地）"
+            % (source, label)
+        )
+    if topology == "rl_highpass" and (l is None or c is not None):
+        raise ValueError(
+            "%s (%s): rl_highpass 需要 L、且不能有 C（R 为串联电阻，L 为并联到地）"
+            % (source, label)
+        )
 
     sweep = pick("sweep", "sweep_id", "curve", "curve_id", "file", "path")
     sweep = str(sweep).strip() if sweep not in (None, "") else label
@@ -442,16 +470,93 @@ def interp_complex_log(
     return np.interp(lf, lo, c_old.real) + 1j * np.interp(lf, lo, c_old.imag)
 
 
-def impedance(freq: Sequence[float], std: dict) -> np.ndarray:
-    """标准件串联阻抗 R + jwL + 1/(jwC)。"""
+SHUNT_TOPOLOGIES = frozenset({"rc_lowpass", "rl_highpass"})
+
+
+def is_shunt_topology(topology: str) -> bool:
+    return str(topology).strip().lower() in SHUNT_TOPOLOGIES
+
+
+def _shunt_element(freq: np.ndarray, std: dict) -> np.ndarray:
+    """Return the shunt element of rc_lowpass / rl_highpass."""
     f = np.asarray(freq, dtype=float)
     w = 2.0 * math.pi * f
+    topology = std["topology"]
+    if topology == "rc_lowpass":
+        return 1.0 / (1j * w * float(std["C"]))
+    if topology == "rl_highpass":
+        return 1j * w * float(std["L"])
+    raise ValueError("不是 shunt topology：%r" % topology)
+
+
+def _parallel(a, b):
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return (a * b) / (a + b)
+
+
+def impedance(freq: Sequence[float], std: dict) -> np.ndarray:
+    """Return the series branch impedance of a standard.
+
+    For series topologies this is the familiar R + jwL + 1/(jwC).  For the
+    shunt topologies it returns the input impedance seen with the output node
+    unloaded: R + Zshunt.  It is used for metadata/diagnostics; the actual
+    transfer and Zin inversion use the topology-aware helpers below.
+    """
+    f = np.asarray(freq, dtype=float)
+    w = 2.0 * math.pi * f
+    topology = std.get("topology", "resistor")
+    if topology == "rc_lowpass":
+        return float(std["R"]) + 1.0 / (1j * w * float(std["C"]))
+    if topology == "rl_highpass":
+        return float(std["R"]) + 1j * w * float(std["L"])
     z = np.full(f.shape, float(std["R"]), dtype=complex)
     if std.get("L") is not None:
         z = z + 1j * w * float(std["L"])
     if std.get("C") is not None:
         z = z + 1.0 / (1j * w * float(std["C"]))
     return z
+
+
+def standard_zin_from_h(
+    freq: Sequence[float], h: Sequence[complex], std: dict
+) -> np.ndarray:
+    """Invert the known standard network to obtain the input-network Zin.
+
+    series:      H = Zin / (Zseries + Zin)
+    rc_lowpass:  H = Zp / (R + Zp), Zp = Zin || Zc
+    rl_highpass: H = Zp / (R + Zp), Zp = Zin || Zl
+    """
+    f = np.asarray(freq, dtype=float)
+    hs = np.asarray(h, dtype=complex)
+    topology = std.get("topology", "resistor")
+    if is_shunt_topology(topology):
+        zsh = _shunt_element(f, std)
+        r = float(std["R"])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            zp = hs * r / (1.0 - hs)
+            return (zp * zsh) / (zsh - zp)
+    z = impedance(f, std)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return hs * z / (1.0 - hs)
+
+
+def reference_transfer(
+    freq: Sequence[float], std: dict, r_ref: float
+) -> np.ndarray:
+    """Known standard transfer with an ideal source and R_ref load.
+
+    series:      H = R_ref / (Zseries + R_ref)
+    rc_lowpass:  H = (Zc || R_ref) / (R + Zc || R_ref)
+    rl_highpass: H = (Zl || R_ref) / (R + Zl || R_ref)
+    """
+    f = np.asarray(freq, dtype=float)
+    topology = std.get("topology", "resistor")
+    if is_shunt_topology(topology):
+        zsh = _shunt_element(f, std)
+        zp = _parallel(zsh, float(r_ref))
+        return zp / (float(std["R"]) + zp)
+    z = impedance(f, std)
+    return float(r_ref) / (z + float(r_ref))
 
 
 def resolve_sweep(source: str, histories: Dict[str, dict]) -> dict:
@@ -498,7 +603,7 @@ def build_rows(
         h_t = interp_complex_log(cal_freqs, sweep["freq"], h_s)
         if np.any(np.abs(h_t) >= 1.0):
             print(
-                "WARNING: %s 有 %d 个频点 |H| >= 1（max=%.4f）。若标准件串了 R>0，"
+                "WARNING: %s 有 %d 个频点 |H| >= 1（max=%.4f）。若标准件不是近短路，"
                 "这通常说明短接表与 sweep 不是同一次 session；行仍会保留，"
                 "请结合校验结果判断。"
                 % (label, int(np.sum(np.abs(h_t) >= 1.0)), float(np.max(np.abs(h_t)))),
@@ -507,19 +612,20 @@ def build_rows(
 
         z_dut = impedance(cal_freqs, std)
         denom = 1.0 - h_t
-        bad = np.abs(denom) < 1e-6
+        with np.errstate(divide="ignore", invalid="ignore"):
+            zin = standard_zin_from_h(cal_freqs, h_t, std)
+        bad = (np.abs(denom) < 1e-6) | (~np.isfinite(zin))
         if np.any(bad):
             print(
-                "WARNING: %s 有 %d 个频点 1-H 接近 0，Zin 反解病态；"
-                "这些点用相邻频点插值补齐。" % (label, int(np.sum(bad))),
+                "WARNING: %s 有 %d 个频点 Zin 反解病态（1-H 接近 0 或 shunt "
+                "并联节点接近开路）；这些点用相邻频点插值补齐。"
+                % (label, int(np.sum(bad))),
                 file=sys.stderr,
             )
-        with np.errstate(divide="ignore", invalid="ignore"):
-            zin = h_t * z_dut / denom
         if np.any(bad):
             good = ~bad
             if np.sum(good) < 2:
-                raise ValueError("%s: 几乎所有频点都落在近短路区，无法建行" % label)
+                raise ValueError("%s: 几乎所有频点都落在病态区，无法建行" % label)
             lf = np.log(cal_freqs)
             lg = lf[good]
             zin[bad] = np.interp(lf[bad], lg, zin.real[good]) + 1j * np.interp(
@@ -669,7 +775,7 @@ def validate_payload(payload: dict, rows: Sequence[dict]) -> List[dict]:
                 for h, f in zip(row["H"], f_grid)
             ]
         )
-        h_model = payload["R_ref"] / (row["Z"] + payload["R_ref"])
+        h_model = reference_transfer(f_grid, row, payload["R_ref"])
         db = 20.0 * np.log10(np.abs(h_disp) + 1e-30) - 20.0 * np.log10(
             np.abs(h_model) + 1e-30
         )
@@ -742,6 +848,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "    --history data/history.csv \\\n"
             "    --standard \"label=97k2,topology=resistor,R=97.2k,sweep=20261027-214036-429028\" \\\n"
             "    --standard \"label=rc11k6,topology=series_rc,R=11.6k,C=10.26n,sweep=20261028-034254-893800\" \\\n"
+            "    --standard \"label=rc_lp_3k3_10n,topology=rc_lowpass,R=3.3k,C=10n,sweep=...\" \\\n"
+            "    --standard \"label=rl_hp_2k2_68m,topology=rl_highpass,R=2.2k,L=68m,sweep=...\" \\\n"
             "    --output data/input_network.built.json"
         ),
     )
@@ -757,7 +865,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="append",
         default=[],
         metavar="SPEC",
-        help="标准件：label=...,topology=...,R=...,L=...,C=...,sweep=...（可重复）",
+        help="标准件：label=...,topology=resistor|series_rc|series_rl|series_rlc|rc_lowpass|rl_highpass,R=...,L=...,C=...,sweep=...（可重复）",
     )
     parser.add_argument(
         "--standards-json",

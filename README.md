@@ -598,7 +598,14 @@ Zin(f)   = H_row(f) * Z_dut(f) / (1 - H_row(f))
 Z_dut(f) = R + jwL + 1/(jwC)
 ```
 
-其中 `raw_row` 是 history 里的未校准复数响应，`H_short` 是自动读取的短接表，`R/L/C` 来自 `--standards-json` 或 `--standard`。输出与 `python_model/input_network.py` 兼容的 format 3 JSON。扫频数据必须保留未校准列（`mag_v_raw/phase_deg_raw`、`mag_raw/phase_raw` 或 `mag_db_raw/phase_deg_raw`）；只有已校准 `mag/phase` 的 CSV 会被拒绝，避免二次校准。
+其中 `raw_row` 是 history 里的未校准复数响应，`H_short` 是自动读取的短接表，`R/L/C` 来自 `--standards-json` 或 `--standard`。对三端 shunt 标准件：
+
+```text
+rc_lowpass  : H = Zp/(R+Zp)，Zp = Zc || Zin
+rl_highpass : H = Zp/(R+Zp)，Zp = Zl || Zin
+```
+
+脚本先由 `H` 求 `Zp`，再由 `Zp = Zshunt || Zin` 反解 `Zin`；校验时使用标准件在 `R_ref` 负载下的真实分压传递函数，而不是 series 公式。输出与 `python_model/input_network.py` 兼容的 format 3 JSON。扫频数据必须保留未校准列（`mag_v_raw/phase_deg_raw`、`mag_raw/phase_raw` 或 `mag_db_raw/phase_deg_raw`）；只有已校准 `mag/phase` 的 CSV 会被拒绝，避免二次校准。
 
 #### 2）准备标准件参数
 
@@ -607,8 +614,8 @@ Z_dut(f) = R + jwL + 1/(jwC)
 | 字段 | 说明 |
 |---|---|
 | `label` | 行名，建议与历史表一致（`97k2`、`rc11k6`…） |
-| `topology` | `resistor` / `series_rc` / `series_rl` / `series_rlc`；省略时按 L/C 自动推断 |
-| `R` | 串联电阻，单位 Ω；RL 要填“电阻 + 电感 DCR”的总电阻 |
+| `topology` | `resistor` / `series_rc` / `series_rl` / `series_rlc` / `rc_lowpass` / `rl_highpass`；省略时按 L/C 自动推断为 series；shunt 必须显式写 |
+| `R` | 串联电阻，单位 Ω；series RL 要填“电阻 + 电感 DCR”的总电阻；shunt 的 R 是串联电阻 |
 | `L` / `C` | 电感 H、电容 F；支持 `9.8m`、`98.11n` 这类 SI 后缀 |
 | `sweep` | `history.csv` 里的 `sweep_id`，或单条 CSV 的路径 |
 

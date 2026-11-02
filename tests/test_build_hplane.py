@@ -34,6 +34,12 @@ class ValueParsingTests(unittest.TestCase):
         self.assertEqual(build_hplane.normalize_topology("", True, False), "series_rl")
         self.assertEqual(build_hplane.normalize_topology("", True, True), "series_rlc")
         self.assertEqual(build_hplane.normalize_topology("rc", False, True), "series_rc")
+        self.assertEqual(
+            build_hplane.normalize_topology("rc_lowpass", False, True), "rc_lowpass"
+        )
+        self.assertEqual(
+            build_hplane.normalize_topology("RL-HP", True, False), "rl_highpass"
+        )
 
 
 class StandardSpecTests(unittest.TestCase):
@@ -81,6 +87,53 @@ class ImpedanceTests(unittest.TestCase):
         )[0]
         self.assertAlmostEqual(z.real, r, delta=1e-6)
         self.assertAlmostEqual(z.imag, 0.0, delta=1e-3)
+
+    def test_shunt_reference_transfer_rolloff(self):
+        freqs = np.array([20.0, 2000.0, 20000.0])
+        rc = {
+            "topology": "rc_lowpass",
+            "R": 1000.0,
+            "C": 100e-9,
+            "L": None,
+        }
+        h_rc = np.abs(build_hplane.reference_transfer(freqs, rc, 10000.0))
+        self.assertGreater(h_rc[0], h_rc[1])
+        self.assertGreater(h_rc[1], h_rc[2])
+        self.assertLess(h_rc[-1], 0.1)
+
+        rl = {
+            "topology": "rl_highpass",
+            "R": 1000.0,
+            "C": None,
+            "L": 100e-3,
+        }
+        h_rl = np.abs(build_hplane.reference_transfer(freqs, rl, 10000.0))
+        self.assertLess(h_rl[0], 0.1)
+        self.assertGreater(h_rl[-1], h_rl[0])
+
+    def test_shunt_standard_parsing_requires_right_element(self):
+        with self.assertRaises(ValueError):
+            build_hplane._standard_from_dict(
+                {
+                    "label": "bad_rc",
+                    "topology": "rc_lowpass",
+                    "R": "1k",
+                    "L": "10m",
+                    "sweep": "s",
+                },
+                "test",
+            )
+        with self.assertRaises(ValueError):
+            build_hplane._standard_from_dict(
+                {
+                    "label": "bad_rl",
+                    "topology": "rl_highpass",
+                    "R": "1k",
+                    "C": "10n",
+                    "sweep": "s",
+                },
+                "test",
+            )
 
 
 class BuildTests(unittest.TestCase):
@@ -142,6 +195,48 @@ class BuildTests(unittest.TestCase):
         for item in validation:
             self.assertLess(item["db_max"], 1e-6)
             self.assertLess(item["phase_max"], 1e-6)
+
+    def _assert_shunt_roundtrip(self, topology, r, element, value):
+        freqs = np.array([20.0, 100.0, 1000.0, 10000.0, 20000.0])
+        zin_true = 10000.0 + 0.0j
+        std = build_hplane._standard_from_dict(
+            {
+                "label": "shunt",
+                "topology": topology,
+                "R": str(r),
+                element: str(value),
+                "sweep": "s_shunt",
+            },
+            "test",
+        )
+        zsh = build_hplane._shunt_element(freqs, std)
+        zp = zsh * zin_true / (zsh + zin_true)
+        h_true = zp / (r + zp)
+        coeff = np.full_like(freqs, 1.0 + 0.0j, dtype=complex)
+        histories = {
+            "s_shunt": {
+                "key": "s_shunt",
+                "freq": freqs.copy(),
+                "h_raw": h_true.copy(),
+                "source": "synthetic",
+                "mode": "test",
+            }
+        }
+        rows = build_hplane.build_rows(freqs, coeff, histories, [std])
+        np.testing.assert_allclose(rows[0]["H"], h_true, atol=1e-12)
+        np.testing.assert_allclose(rows[0]["Zin"], zin_true, atol=1e-6)
+        payload = build_hplane.build_payload(
+            freqs, rows, 10000.0, "test", {}, "synthetic", [], None, "test"
+        )
+        for item in build_hplane.validate_payload(payload, rows):
+            self.assertLess(item["db_max"], 1e-6)
+            self.assertLess(item["phase_max"], 1e-6)
+
+    def test_rc_lowpass_roundtrip(self):
+        self._assert_shunt_roundtrip("rc_lowpass", 1000.0, "C", 100e-9)
+
+    def test_rl_highpass_roundtrip(self):
+        self._assert_shunt_roundtrip("rl_highpass", 1000.0, "L", 100e-3)
 
 
 if __name__ == "__main__":
