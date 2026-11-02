@@ -106,9 +106,9 @@ PL（100 MHz）
 
 ### 2.2 FPGA 内部数据通路
 
-1. **DDS**：32 位相位累加器，1024 点正弦表，同时输出 `sine` 与超前 90° 的 `cosine`；每次测量前由状态机复位到 0 相位。
-2. **I2S TX**：把 DDS 样本送到 ADAU1761 DAC；`bclk = 100 MHz / 32 = 3.125 MHz`，每帧 2048 个系统时钟，因此 `fs = 100 MHz / 2048 = 48828.125 Hz`。
-3. **模拟环路**：HP 输出 → DUT → LINE IN → ADAU1761 ADC。左右声道在 `i2s_rx` 中相加并饱和，夹具接 Tip 或 Ring 都能测。
+1. **DDS**：32 位相位累加器，1024 点正弦表，同时输出 `sine` 与超前 90° 的 `cosine`；每次测量前装载 `-2046·phase_inc`，使第一个真正被 demod 消费的样本相位为 0。
+2. **I2S TX**：首次 `ps_start` 才释放 `i2s_tx.enable`，输出从固定 LRCLK 状态开始，并等待 1024 个采样帧暖机；`bclk = 100 MHz / 32 = 3.125 MHz`，每帧 2048 个系统时钟，因此 `fs = 100 MHz / 2048 = 48828.125 Hz`。
+3. **模拟环路**：HP 输出 → DUT → LINE IN → ADAU1761 ADC。`i2s_rx` 在右声道采样点用当前帧的 L+R 生成 `mix_data`，并同时给出 `data_valid`；夹具接 Tip 或 Ring 都能测。
 4. **I/Q 解调**：`adc_in` 分别与 `cos`、`-sin` 相乘，乘积打一拍后进入 48 位累加器；整数个信号周期内 2f 分量平均为 0。
 5. **测量状态机**：`IDLE → MEASURE → FLUSH → DONE`。`ps_window_max` 在启动前写入；窗满后先 FLUSH 一拍补上最后一个流水线样本，再把结果锁存到 `latched_acc_I/Q`，最后置起 `out_done`。
 6. **PS 读取**：4 个 AXI GPIO 分别负责频率控制字、积分窗长/完成标志、I 路高低位、Q 路高低位；48 位有符号数按补码还原。
@@ -183,13 +183,15 @@ PL（100 MHz）
 
 ### 3.2 H 平面误差
 
-![14 行 H 平面误差](report/hplane_14rows_errors.png)
+![历史 14 行 H 平面误差（2026-10）](report/hplane_14rows_errors.png)
 
-逐行数值见 [`report/hplane_14rows_errors.md`](report/hplane_14rows_errors.md)。这些误差依赖短接帧相位、线缆、标准件容差和温度，换环境后数值会变，但可以用同一套流程重新得到。
+上图和 [`report/hplane_14rows_errors.md`](report/hplane_14rows_errors.md) 是 2026-10 的历史 14 行版本，仅用于对照，不代表当前 16 行表。当前 16 行表的建立与校验见 [`report/hplane_16rows_20261102.md`](report/hplane_16rows_20261102.md)。
 
-> 当前 `data/input_network.json` 是 **2026-11-02 的 16 行表**：在 14 行基础上增加 `rc0n956_9k9`（9.9 kΩ + 0.956 nF）和 `rl22m_6k86`（6.86 kΩ + 22 mH），并用当前 1 轮短接表重建。旧 `hplane_14rows_errors` 图/报告保留为历史版本；新表的 in-sample 校验见 [`report/hplane_16rows_20261102.md`](report/hplane_16rows_20261102.md)。
+> 当前 `data/input_network.json` 是 **2026-11-02 的 16 行表**：在 14 行基础上增加 `rc0n956_9k9`（9.9 kΩ + 0.956 nF）和 `rl22m_6k86`（6.86 kΩ + 22 mH），并用当前 1 轮短接表重建。旧 `hplane_14rows_errors` 图/报告保留为历史版本。
 
 ### 3.3 资源与时序报告
+
+> 以下截图来自历史构建，用于说明资源/时序量级；当前 RTL 已加入 I2S 门控、RX valid 对齐和 DDS 相位预装，重新综合后应以新报告为准。
 
 <details>
 <summary>展开 Vivado 资源占用 / 时序截图</summary>
@@ -310,7 +312,7 @@ python -m diagnosis_system.dashboard.app
 
 浏览器打开 `http://127.0.0.1:5000`，点击“开始扫频测量”。Windows 下后端会明确标注“Windows 演示数据”，不会假装是硬件实测。
 
-> **注意**：`run_dashboard.py` 是板端入口，启动时会加载 Codec/PL；在 PC 上运行会因缺少 `pynq` 失败。PC 演示请使用上面的 `python -m diagnosis_system.dashboard.app`。
+> **注意**：`run_dashboard.py` 只负责启动板端 Flask，要求先执行 `board/start_pl_i2s.sh` 让 PL/I2S 常驻；它自己不会加载 Codec/PL，在 PC 上运行也会因缺少 `pynq` 失败。PC 演示请使用上面的 `python -m diagnosis_system.dashboard.app`。
 
 > **演示数据说明**：`data/dataset_rc_lpf.csv` 是仓库保留的 20 点真机片段，所以 PC 页面只画 20 个点；完整的 240 点演示曲线在 `diagnosis_system/dashboard/data_rc_lpf.csv`。如果希望 PC 演示也显示 240 点，可在备份后把后者复制为前者：
 >
@@ -325,11 +327,11 @@ python -m diagnosis_system.dashboard.app
 >
 > - 目录：`/home/xilinx/jupyter_notebooks/project`；不是 git 仓库，而是平铺部署。
 > - 根目录：`acceptance.py`、`ps_ctrl.py`、`audio_loopback.py`、`run_dashboard.py`、`start_dashboard.sh`、`data/`、`board/`、`python_model/`、`diagnosis_system/`、`tools/` 等并列；`acceptance.py`/`ps_ctrl.py`/`audio_loopback.py` 在根目录与 `board/` 下各有一份同源副本，实际 import 时 `board/` 副本在 `sys.path` 中更靠前。
-> - `data/history.csv`：102,720 行 / 428 个 sweep，每个 240 点，全部 `pynq_rtl`。
-> - `data/calibration_table.json`：240 个 `direct` 频点，`created=2026-10-28T19:18:53`，`dac_volume=16`。
-> - `data/input_network.json`：16 行，`R_ref=10989`，与仓库版本数值一致。
+> - `data/history.csv`：119,040 行 / 496 个 sweep，每个 240 点，全部 `pynq_rtl`。
+> - `data/calibration_table.json`：240 个 `direct` 频点，`created=2026-10-29T06:22:18`，`repeat=1`，`dac_volume=16`。
+> - `data/input_network.json`：16 行，`R_ref≈10989`，与仓库版本数值一致。
 > - `data/real/`：5 类 × 30 条（板端是 2026-10-28 采集批次，数值与仓库后续快照可能略有差异）。
-> - 检查时 dashboard 进程未运行；Jupyter `9090` 正常，启动 dashboard 后浏览器访问 `:5000`。
+> - dashboard 正在运行；浏览器访问 `:5000`，Jupyter `9090` 独立运行。
 >
 > 因此当前板子**不要重新 clone 覆盖** `project`；更新时用 `scp` 只同步目标文件（例如 `tools/build_hplane.py` → `project/tools/`）。修改根目录与 `board/` 的同名驱动时请同步两份，避免“改了 `board/` 但根目录还是旧版”或反之。
 
@@ -528,9 +530,10 @@ python3 -c "import json; d=json.load(open('data/acceptance_latest.json')); print
 
 `backend=rtl` 时应看到 `passed=True`，`checks` 至少包含 `nonzero`、`clock_matches`、`magnitude_valid`；终端同时会打印 `acc_I`、`acc_Q`、`N`、`phase_raw_deg` 等证据。
 
-验收通过后，重新启动 dashboard：
+验收通过后，重新拉起常驻 PL/I2S，再启动 dashboard：
 
 ```bash
+sudo bash board/start_pl_i2s.sh
 bash start_dashboard.sh
 ```
 
@@ -661,18 +664,24 @@ python3 tools/build_hplane.py \
 python3 -m unittest tests.test_build_hplane -v
 ```
 
-#### 5）关键：短接表必须与标准件扫频同一次 session
+#### 5）短接表与标准件 sweep 的 session 约束
 
-这是本项目最容易踩的坑，也是脚本会重点警告的原因：
+H 平面表的每一行都依赖“当时的短接表 × 当时的原始扫频”。如果短接表与 sweep 来自不同 session，`H` 会出现 `|H| > 1`、`Zin` 实部为负或校验警告。
 
-- `data/history.csv` 是多次 session 的汇总（本次板端 428 个 sweep）；
-- `data/calibration_table.json` 只代表**当前/最近一次**短接（本次板端 created=`2026-10-28T19:18:53`）；
-- 14 行表的标准件 sweep 来自 10/27–10/28 更早的 session，建表时用的是当时的 `cal_board.json`。
+当前 16 行表的情况：
 
-因此，**直接用当前 `calibration_table.json` + 模板里的旧 sweep_id 建表，会出现 `|H| > 1`、`Zin` 实部为负、校验最差 4.96 dB/23.14° 等警告**。这不是脚本算错，而是短接表/扫频数据配错了。两条正确路径：
+- `data/history.csv` 是多 session 汇总，当前板端 496 个 sweep；
+- 当前短接表为 `created=2026-10-29T06:22:18`、`repeat=1`；
+- 12 组原始标准件来自 10/27–10/28 旧 session；`rl41m_3k87`、`rlrc1k98`、`rc0n956_9k9`、`rl22m_6k86` 来自近期 session。
 
-1. **重建仓库那一版 14 行表**：换回建表当时的短接表（工作区/备份中的 `cal_board.json`，created=`2026-10-27T20:16:31`；仓库未收录，需从开发机或板端备份获取），临时放到 `data/calibration_table.json` 后运行，跑完恢复当前表。旧表的 `rlrc1k98` 当年是“13 行表 + IDW 再反解”的逐步流程，直接反解可能有个别行小幅差异，以校验结果为准；
-2. **在当前短接表下重建**（推荐）：先接短接点“一键短接校准”生成当前 `calibration_table.json`，再依次接每只标准件做网页扫频，把新的 sweep_id 填进标准件 JSON，然后建表。这样短接表与 sweep 才是同一 session。
+因此当前表是“混合 session 的在线表”，in-sample 校验只能说明建表链路自洽，不能证明对未知 DUT 的泛化误差。要做严格版本：
+
+1. 保持当前常驻 PL/I2S；
+2. 用“一键短接校准”生成当前短接表；
+3. 在当前 session 下依次重扫全部标准件，更新 `tools/hplane_standards.20261102.json` 的 sweep_id；
+4. 用 `tools/build_hplane.py` 重建，确认校验通过后再替换线上表。
+
+不建议靠调参或手工修改 `H` 来掩盖 session 不一致。
 
 #### 6）确认后再替换线上表
 
@@ -698,7 +707,7 @@ bash start_dashboard.sh
 4. Generate Bitstream；
 5. 导出 XSA（勾选 include bitstream），覆盖 `board/design_1_wrapper.xsa`；
 6. 同时更新 `board/design_1_wrapper.bit`（推荐；至少保证 XSA 正确，见下方说明）；
-7. 重启 dashboard，让 `_ensure_rtl_design()` 重新加载。
+7. 停 dashboard，执行 `sudo bash board/start_pl_i2s.sh --force` 重新拉起 PL/I2S，再启动 dashboard；dashboard 本身不加载 bitstream。
 
 注意事项：
 
@@ -733,7 +742,7 @@ RTL 仿真：
 
 ### 校准开关
 
-调试时可通过 `cal_mode.json` 临时关闭校准：
+临时排查时可切换 `cal_mode.json` 关闭校准：
 
 ```bash
 bash board/cal_toggle.sh status
@@ -750,7 +759,7 @@ bash board/cal_toggle.sh all      # 直连/缓冲都启用
 
 1. **类别覆盖有限**：当前模型只有 5 类（RC/RL 低通/高通、RLC 带通）；`opamp_lowpass` 是代码中的第 6 类占位，没有实测数据。分类准确率 100% 只针对同环境 150 条曲线的 80/20 划分，不是跨设备泛化指标。
 2. **校准表是环境快照**：`data/calibration_table.json` 和 `data/input_network.json` 依赖短接帧相位、线缆、标准件容差、DAC 音量和温度。换环境时先停 dashboard，执行 `sudo bash board/start_pl_i2s.sh --force`，再用网页做一次“一键短接校准”；H 平面表在夹具不变时可以复用，但更换夹具/线缆后需要重建。
-3. **H 平面表必须与短接表同 session**：建表脚本已入库为 `tools/build_hplane.py`，短接表自动读 `data/calibration_table.json`；但 `data/history.csv` 是多 session 汇总，直接拿当前短接表 + 旧标准件 sweep 会看到 `|H|>1`、Zin 为负、校验误差变大。复现旧表要用当时的 `cal_board.json`（仓库未收录，需从开发机/板端备份获取）；在当前环境重建应先重新采标准件。脚本会打印警告，不要用调参掩盖数据配对问题。
+3. **H 平面表是“短接表 + 标准件 sweep”的联合快照**：每一行都对应建表时使用的短接表。当前 16 行表混用了 14 组旧 session 标准件和 4 组近期标准件，因此 in-sample 校验只证明建表链路自洽；要做严格版本，应在当前 persistent session 下重扫全部标准件，不要用旧 raw + 当前短接表拼表。脚本会打印 `|H|>1`/session 警告，不要用调参掩盖配对问题。
 4. **近短路病态**：`|H|` 接近 1 时 `Z_dut = Zin(1-H)/H` 会放大误差；代码在 `|H| > 0.999` 时直接返回原 H。纯电感等低阻 DUT 的短接判据也可能放行，需要更细的绝对门限。
 5. **频率与拓扑限制**：20 Hz–20 kHz 覆盖音频范围内的 RC/RL/RLC，但不适合高频/射频或大功率电路；测量是单端两线方式，不是四线开尔文，夹具寄生会进入结果。
 6. **演示数据只有 20 点**：`data/dataset_rc_lpf.csv` 是保留的真机片段，PC 页面只画 20 点；完整 240 点演示曲线在 `diagnosis_system/dashboard/data_rc_lpf.csv`，可按 5.2 的说明替换。相应地，`tests/test_dashboard_api.py` 的 240 点断言也要在替换后才通过。
@@ -778,7 +787,7 @@ bash board/cal_toggle.sh all      # 直连/缓冲都启用
 | [`skill/DE_EMBED_METHOD.md`](skill/DE_EMBED_METHOD.md) | 短接校准、H 平面、`R_ref` 重嵌入的完整推导 |
 | [`skill/README.md`](skill/README.md) | 项目沉淀的 50 条 FPGA/PYNQ 工程技能 |
 | [`skill/Universal_PYNQ_Skill.md`](skill/Universal_PYNQ_Skill.md) | 可迁移到其他 PYNQ 项目的通用技能 |
-| [`prompts/`](prompts/) | 开发过程中的 AI 协作/调试记录（可选阅读） |
+| [`prompts/`](prompts/) | 开发过程归档（可选阅读） |
 
 ---
 
