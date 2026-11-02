@@ -72,6 +72,16 @@
             padding: 17px 22px;
         }
         .switch-wrap { display: flex; align-items: center; gap: 11px; font-size: 14px; }
+        .dut-type { display: flex; align-items: center; gap: 10px; font-size: 14px; color: #334155; }
+        .dut-type select {
+            min-width: 170px;
+            padding: 8px 11px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            background: #ffffff;
+            color: #0f172a;
+            font-size: 14px;
+        }
         .switch { position: relative; width: 48px; height: 26px; }
         .switch input { width: 0; height: 0; opacity: 0; }
         .slider {
@@ -204,6 +214,14 @@
     </header>
 
     <section class="panel controls">
+        <label class="dut-type" for="dut-type">
+            DUT 接线方式
+            <select id="dut-type" title="二端口使用 series 子表；三端口使用 shunt 子表">
+                <option value="series" selected>二端口 series</option>
+                <option value="shunt">三端口 shunt</option>
+            </select>
+        </label>
+        <span class="muted" style="font-size:12px">series=2 端串联；shunt=3 端并联，shunt 为等效显示</span>
         <button id="start-btn" type="button" onclick="startSweep()">开始扫频测量</button>
     </section>
 

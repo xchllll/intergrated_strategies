@@ -37,7 +37,7 @@ rl_highpass : R 串联，L 并联到地
 
 ### series 行
 
-沿用原来的 series 校验路径，16 行结果与 19 行/16 行表一致。
+沿用原来的 series 校验路径，16 行结果与旧 series 表一致。
 
 ### shunt 行
 
@@ -70,14 +70,23 @@ meta.table_kind
 meta.standards[*].topology
 ```
 
-- `deembed_complex()` 默认使用 `topology="series"`，只取 16 行 series 子表；
+网页左上角新增 **DUT 接线方式**：
+
+```text
+二端口 series  → deembed_complex()，只取 16 行 series 子表
+三端口 shunt   → deembed_shunt_equivalent()，只取 6 行 shunt 子表
+```
+
+`deembed_shunt_equivalent()` 是明确的“等效 series 显示”：使用 shunt 子表估计 Zin，再按 series 等效阻抗重嵌入 `R_ref`。三端口网络的严格 `H_disp` 仍需要 DUT 的 R/L/C 参数；网页会在 warnings 中提示。
+
+- `deembed_complex()` 默认使用 `topology="series"`；
 - `zin_at(..., topology="shunt")` 或具体 topology 名使用 shunt 子表；
-- 对 shunt-only 表或显式请求 shunt 显示会明确报错，不静默套用 series 公式；
+- 对 shunt-only 表或显式请求 shunt 的 `deembed_complex()` 会明确报错，不静默套用 series 公式；
 - 默认 series 去嵌入结果与旧 16 行 series 表对比，最大差异为 **0**。
 
 ## 5. 限制
 
-- 当前 dashboard 没有“未知 DUT topology/参数”的输入，默认仍按 series 显示；shunt 行已经进入表和 API，但还没有接到 shunt 显示 UI。
+- 网页已有 series/shunt 接线方式选择，但还没有 shunt DUT 的 R/L/C 输入，因此 shunt 模式是等效 series 显示，不是严格三端口反解。
 - shunt 行是实测数据，低频异常/夹具残余会保留在表中，不会被理论模型自动“修正”。
 - in-sample 校验只证明建表/分组链路自洽，不是独立测试。
 

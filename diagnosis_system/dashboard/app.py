@@ -316,7 +316,7 @@ def _run_short_calibration_bg(repeat: int):
         app.logger.exception("一键短接校准失败")
 
 
-def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
+def _run_rtl_hardware_sweep(use_buffer: bool, dut_type: str = "series") -> tuple[dict, dict, list[str]]:
     import calibration as cal
     import ps_ctrl
 
@@ -324,6 +324,9 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     cal.note_driver(dac_volume=_current_dac_volume())
     cal_path_str = "buffer" if use_buffer else "direct"
     cal_status = _calibration_state(cal, cal_path_str) # 使用修复后的状态函数
+    if dut_type == "shunt":
+        cal_status = dict(cal_status)
+        cal_status["message"] = cal_status.get("message", "") + "；shunt 子表等效显示"
     
     cal_path = cal.CAL_PATH_BUFFER if use_buffer else cal.CAL_PATH_DIRECT
 
@@ -343,7 +346,8 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
         period = period_list[index]
         acc_i, acc_q, window_n = ps_ctrl.measure_once(freq, periods=period)
         mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
-        mag_cal, phase_cal = cal.apply_calibration(mag, phase, freq, path=cal_path)
+        mag_cal, phase_cal = cal.apply_calibration(
+            mag, phase, freq, path=cal_path, dut_type=dut_type)
         data["freqs"].append(freq)
         data["mag_db"].append(20.0 * math.log10(mag_cal) if mag_cal > 0 else -99.0)
         data["phase_deg"].append(phase_cal)
@@ -413,10 +417,10 @@ def _run_audio_loopback_sweep() -> tuple[dict, dict, list[str]]:
     return data, calibration, warnings
 
 
-def _run_hardware_sweep(mode: str, cal_path: str) -> tuple[dict, dict, list[str]]:
+def _run_hardware_sweep(mode: str, cal_path: str, dut_type: str = "series") -> tuple[dict, dict, list[str]]:
     if mode == "rtl":
         _ensure_rtl_design()
-        return _run_rtl_hardware_sweep(cal_path == "buffer")
+        return _run_rtl_hardware_sweep(cal_path == "buffer", dut_type=dut_type)
     else:
         return _run_audio_loopback_sweep()
 
@@ -551,6 +555,10 @@ def start_sweep():
     cal_path = str(payload.get("cal_path", "direct")).lower()
     if cal_path not in ["direct", "buffer"]:
         cal_path = "direct"
+
+    dut_type = str(payload.get("dut_type", "series")).lower()
+    if dut_type not in ["series", "shunt"]:
+        dut_type = "series"
         
     if payload.get("use_buffer") is True:
         cal_path = "buffer"
@@ -568,7 +576,7 @@ def start_sweep():
             sweep_warnings = []
             _sweep_set(progress=total, message="扫频完成")
         else:
-            data, calibration, sweep_warnings = _run_hardware_sweep(mode, cal_path)
+            data, calibration, sweep_warnings = _run_hardware_sweep(mode, cal_path, dut_type=dut_type)
             
     except Exception as exc:
         _sweep_set(running=False, error=str(exc),
@@ -586,6 +594,7 @@ def start_sweep():
         "status": "success",
         "source": source,
         "calibration": calibration,
+        "dut_type": dut_type,
         "data": data,
         "ai": ai_result,
         "warnings": [],
@@ -601,6 +610,11 @@ def start_sweep():
         response["warnings"].append("当前展示的是演示 CSV，不是 PYNQ 硬件测量结果。")
     if source["is_real"] and not calibration.get("calibrated"):
         response["warnings"].append("校准表为空或缺少对应路径；曲线为未校准原始测量。")
+    if dut_type == "shunt":
+        response["warnings"].append(
+            "shunt 三端口模式使用 shunt 子表做等效 series 显示；"
+            "严格 H_disp 需要已知 DUT 的 R/L/C。"
+        )
 
     _sweep_set(running=False, done=True, progress=total,
                message="扫频完成（%d/%d）" % (total, total))

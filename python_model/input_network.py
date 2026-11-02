@@ -225,11 +225,40 @@ def deembed_complex(h_cal, freq, use_crosstalk=False, topology="series"):
     return _RREF / (z_dut + _RREF)
 
 
+def deembed_shunt_equivalent(h_cal, freq, use_crosstalk=False):
+    """Shunt DUT 的等效显示路径。
+
+    使用 shunt 子表的 H→Zin 插值，再按 series 等效阻抗重嵌入 R_ref。
+    这是一个明确的“等效 series 显示”，不是三端口 shunt 网络的严格
+    H_disp；严格反解需要 DUT 的 R/L/C 参数。网页的 shunt 模式会提示这一点。
+    """
+    _ensure()
+    if not any(_is_shunt_topology(t) for t in _TOPOLOGIES):
+        raise ValueError("当前 H 平面表没有 shunt 子表")
+    h = complex(h_cal)
+    if abs(h) > 0.999:
+        return h
+    if abs(h) < 1e-5:
+        return 0j
+    L = crosstalk_at(freq) if use_crosstalk else 0j
+    A = h * (1 + L) - L
+    if abs(A) < 1e-9:
+        return 0j
+    zin = zin_at(freq, h, topology="shunt")
+    z_dut = zin * (1 - A) / A
+    if abs(z_dut) > 1e12:
+        return 0j
+    return _RREF / (z_dut + _RREF)
+
+
 def deembed(mag, phase_deg, freq, use_crosstalk=False, topology="series"):
     """输入: 短接校准后的幅值/相位；输出: 去嵌入后的 (mag, phase_deg)。"""
     h = mag * complex(math.cos(math.radians(phase_deg)),
                       math.sin(math.radians(phase_deg)))
-    hd = deembed_complex(h, freq, use_crosstalk=use_crosstalk, topology=topology)
+    if topology == "shunt":
+        hd = deembed_shunt_equivalent(h, freq, use_crosstalk=use_crosstalk)
+    else:
+        hd = deembed_complex(h, freq, use_crosstalk=use_crosstalk, topology=topology)
     return abs(hd), math.degrees(math.atan2(hd.imag, hd.real))
 
 

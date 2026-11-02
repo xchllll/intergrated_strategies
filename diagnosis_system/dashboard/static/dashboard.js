@@ -167,6 +167,8 @@ document.addEventListener('keydown', (event) => {
 async function startSweep() {
     const button = document.getElementById('start-btn');
     const calBtn = document.getElementById('cal-btn');
+    const dutTypeSelect = document.getElementById('dut-type');
+    const dutType = dutTypeSelect ? dutTypeSelect.value : 'series';
 
     if (window.__lastShortCal && window.__lastShortCal.running) {
         setNotice('正在进行一键短接校准，请稍候...', false);
@@ -186,6 +188,7 @@ async function startSweep() {
     };
     button.disabled = true;
     button.textContent = '扫频中 0/240';
+    if (dutTypeSelect) dutTypeSelect.disabled = true;
     if (calBtn) calBtn.disabled = true;
     document.getElementById('ai-topo').textContent = '计算中...';
     document.getElementById('ai-conf').textContent = '--%';
@@ -194,8 +197,9 @@ async function startSweep() {
     try {
         // A2: 模式拆分，默认请求 rtl 自研模式
         const payload = {
-            mode: "rtl", 
-            cal_path: "direct"
+            mode: "rtl",
+            cal_path: "direct",
+            dut_type: dutType
         };
 
         const response = await fetch('/api/start_sweep', {
@@ -236,6 +240,7 @@ async function startSweep() {
         button.disabled = false;
         button.textContent = '开始扫频测量';
         button.title = '';
+        if (dutTypeSelect) dutTypeSelect.disabled = false;
         if (calBtn && !(window.__lastShortCal && window.__lastShortCal.running)) {
             calBtn.disabled = false;
         }

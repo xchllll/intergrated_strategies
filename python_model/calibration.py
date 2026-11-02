@@ -301,10 +301,12 @@ _INPUT_NETWORK = None
 _INPUT_NETWORK_FAILED = False
 
 
-def _apply_input_network(h_dut, freq):
+def _apply_input_network(h_dut, freq, dut_type="series"):
     """把 codec 输入端的频变阻抗从测量中扣掉，再以恒定 R_ref 重新嵌入。
 
     输入: 已做短接校准的复数 H；输出: 去嵌入后的复数 H。
+    dut_type="series" 使用 series 子表；dut_type="shunt" 使用 shunt 子表
+    并返回明确的等效 series 显示（三端口严格反解需要 DUT 参数）。
     表文件缺失/损坏时静默回退到短接校准值，只告警一次。
     """
     global _INPUT_NETWORK, _INPUT_NETWORK_FAILED
@@ -321,6 +323,8 @@ def _apply_input_network(h_dut, freq):
                        "输入网络去嵌入不可用（%s），本次返回短接校准值" % exc)
             return h_dut
     try:
+        if dut_type == "shunt":
+            return _INPUT_NETWORK.deembed_shunt_equivalent(h_dut, freq)
         return _INPUT_NETWORK.deembed_complex(h_dut, freq)
     except Exception as exc:  # noqa: BLE001
         _warn_once("input_network_run",
@@ -375,12 +379,13 @@ def load_cal_mode(path=None):
     return _CAL_MODE
 
 
-def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT):
+def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT, dut_type="series"):
     """查校准表，返回校准后的真实幅值与相位。
 
     只使用指定路径（直连/缓冲）的标定数据，在校准表频率范围内做线性
     插值（相位偏移先回绕再插值），范围外取最近端点；表为空时若默认校准
     表文件存在则自动加载，仍无数据或该路径未标定时返回原值并提示一次。
+    dut_type: "series" | "shunt"；shunt 使用 shunt 子表的等效 series 显示。
     返回: (mag_cal, phase_cal)
     """
     mode = load_cal_mode()
@@ -439,7 +444,7 @@ def apply_calibration(mag, phase, freq, path=CAL_PATH_DIRECT):
     h_dut = h_meas * h_cal
     # 输入网络表只针对 direct（短接）路径标定；buffer 路径由缓冲器隔离，不套用
     if path == CAL_PATH_DIRECT and mode.get("hplane", True) is not False:
-        h_dut = _apply_input_network(h_dut, freq)
+        h_dut = _apply_input_network(h_dut, freq, dut_type=dut_type)
     return (abs(h_dut),
             _wrap_180(math.degrees(math.atan2(h_dut.imag, h_dut.real))))
 

@@ -83,6 +83,17 @@ class TopologyAwareTableTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             input_network.deembed_complex(h, 20000.0, topology="shunt")
 
+    def test_shunt_equivalent_path_uses_shunt_rows(self):
+        path = self._write_table()
+        try:
+            input_network.load(path)
+        finally:
+            Path(path).unlink(missing_ok=True)
+        h = 0.1 + 0.0j
+        d = input_network.deembed_shunt_equivalent(h, 20000.0)
+        # Zin=2000, Z_dut=2000*(1-H)/H=18000, R_ref=10000
+        self.assertAlmostEqual(abs(d), 10000.0 / 28000.0, delta=1e-9)
+
 
 if __name__ == "__main__":
     unittest.main()

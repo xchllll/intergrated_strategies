@@ -6,7 +6,7 @@
 
 > 项目状态：测量链路、短接校准、输入网络去嵌入、机器学习拓扑识别与网页展示已经打通；仓库内保留了某次可用环境下的实测数据、校准表和验收记录，便于复现与对照。
 
-> **最短复现路径**：板端部署 → `sudo bash board/start_pl_i2s.sh`（上电后一次性加载 PL/Codec 并常驻 I2S）→ `bash start_dashboard.sh` → 接 0 Ω 短接，点“一键短接校准”并输入轮次 → 换 DUT，点“开始扫频测量”。之后 dashboard 可以随意重启，不需要再加载 PL 或重新校准。完整步骤见第五节；没有板子可先看 5.2 的 PC 演示。
+> **最短复现路径**：板端部署 → `sudo bash board/start_pl_i2s.sh`（上电后一次性加载 PL/Codec 并常驻 I2S）→ `bash start_dashboard.sh` → 接 0 Ω 短接，点“一键短接校准”并输入轮次 → 换 DUT，选择“二端口 series / 三端口 shunt”，点“开始扫频测量”。之后 dashboard 可以随意重启，不需要再加载 PL 或重新校准。完整步骤见第五节；没有板子可先看 5.2 的 PC 演示。
 
 ---
 
@@ -486,22 +486,28 @@ PY
 
 ### 5.5 测量 DUT
 
-1. 断开短接，把 DUT 串入 HP/MIC 耳机口 → LINE IN；
-2. 网页点击“开始扫频测量”；
-3. 扫频过程中按钮显示当前进度 `x/240`；
-4. 等待约 20 秒；
-5. 查看幅频/相频曲线和右侧“AI 识别结果”。
+1. 断开短接，把 DUT 接入 HP/MIC 耳机口 → LINE IN；
+2. 在网页左上角选择 **DUT 接线方式**：
+   - `二端口 series`：二端串联 DUT；
+   - `三端口 shunt`：三端并联 DUT（RC 低通 / RL 高通等）；
+3. 点击“开始扫频测量”；
+4. 扫频过程中按钮显示当前进度 `x/240`；
+5. 等待约 20 秒；
+6. 查看幅频/相频曲线和右侧“AI 识别结果”。
 
 后端流程：
 
 ```text
-_run_rtl_hardware_sweep()
+_run_rtl_hardware_sweep(..., dut_type=selected)
   → 240 点对数扫频，每点按 build_period_schedule() 设频/设窗/启动/回读
   → calibration.calc_mag_phase(acc_I, acc_Q, N)
-  → calibration.apply_calibration(..., path="direct")
-  → apply_calibration 内部调用 input_network.deembed_complex()（22 行 topology-aware 表，默认 series 子表）
+  → calibration.apply_calibration(..., path="direct", dut_type=selected)
+  → series: input_network.deembed_complex() 使用 series 子表
+  → shunt : input_network.deembed_shunt_equivalent() 使用 shunt 子表
   → 返回 mag_db / phase_deg / AI 结果
 ```
+
+> shunt 模式当前是明确的 **等效 series 显示**：它使用 shunt 子表的 H→Zin 插值，但三端口网络的严格 H_disp 仍需要 DUT 的 R/L/C 参数。网页会在 warnings 中显示这一点。
 
 每次网页扫频都会追加到 `data/history.csv`，同时保留未校准的 `mag_v_raw/phase_deg_raw` 和已校准的 `mag_db_cal/phase_deg_cal`，便于事后重标定。
 
