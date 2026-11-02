@@ -788,6 +788,7 @@ bash board/cal_toggle.sh all      # 直连/缓冲都启用
 | [`docs/environment.md`](docs/environment.md) | 板端/PC 版本、bitstream/XSA 信息、复现命令 |
 | [`docs/register_map.md`](docs/register_map.md) | 4 个 AXI GPIO 的基地址、通道与位宽 |
 | [`docs/minimum_acceptance.md`](docs/minimum_acceptance.md) | 最低档验收标准、接线、音频引脚依据 |
+| [`report/DESIGN_REPORT.md`](report/DESIGN_REPORT.md) | 综合设计报告：选题、原理、软硬件划分、优化、大模型协作、技能包、复现 |
 | [`report/performance_metrics.md`](report/performance_metrics.md) | 扫频、重复性、校准、分类与验收指标汇总 |
 | [`report/hplane_14rows_errors.md`](report/hplane_14rows_errors.md) | 14 行 H 平面逐行误差 |
 | [`report/hplane_current_short_20261102.md`](report/hplane_current_short_20261102.md) | 当前短接表套 14 组标准件的幅相误差分析 |
