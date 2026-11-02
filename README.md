@@ -33,7 +33,7 @@
 | 全数字相干解调 | DDS 产生 16 位正弦/余弦本振，PL 内完成混频与 48 位有符号累加 |
 | 自适应积分窗 | 按 `N = periods·fs/f` 覆盖整数个信号周期，高频自动增加周期数，低频受下限保护 |
 | 帧边界对齐 | `top.v` 把 `ps_start` 锁存到 `rx_data_valid`，使每次测量的 DDS 相位从确定的 I2S 帧边界开始 |
-| 三层校准 | 短接复数校准 → 19 行 topology-aware H 平面输入网络去嵌入 → 以 `R_ref` 为参考重新嵌入 |
+| 三层校准 | 短接复数校准 → 22 行 topology-aware H 平面输入网络去嵌入 → 以 `R_ref` 为参考重新嵌入 |
 | 一键短接校准 | 网页弹窗输入轮次，多轮短接扫频做复数平均，原始数据交给 `calibrate_path.py` 写表；不写 `history.csv` |
 | 跨进程相位锚定 | 上电后一次 `start_pl_i2s.sh` 让 PL/I2S/Codec 常驻；dashboard 重启只附着已有 PL，不再加载 bitstream，Codec 帧状态不被打断 |
 | 双测量后端 | 自研 PL 解调链路（完整幅相）；PYNQ 官方音频闭环（幅值可用、相位无物理参考，用于最低档硬件自检） |
@@ -68,7 +68,7 @@ H_cal(f) = raw(f) · H_short⁻¹(f)
 
 **第二层：输入网络去嵌入（消 Zin）**
 
-`Zin(f)` 不是常数：低频约 10.99 kΩ，高频因并联电容和串联电感而下降并相移。仓库的 `data/input_network.json` 是当前 **19 行 topology-aware H 平面表**，每行是一条标准件的 `(f, H, Zin)` 曲线，并在 `meta.standards` 中带 topology。默认 series 去嵌入只使用 16 行 series 子表；shunt 行由 topology-aware 接口单独使用。测量时在复平面 H 上做反距离加权，插值出当前 DUT 对应的 `Zin(f)`，再反解：
+`Zin(f)` 不是常数：低频约 10.99 kΩ，高频因并联电容和串联电感而下降并相移。仓库的 `data/input_network.json` 是当前 **22 行 topology-aware H 平面表**，每行是一条标准件的 `(f, H, Zin)` 曲线，并在 `meta.standards` 中带 topology。默认 series 去嵌入只使用 16 行 series 子表；shunt 行由 topology-aware 接口单独使用。测量时在复平面 H 上做反距离加权，插值出当前 DUT 对应的 `Zin(f)`，再反解：
 
 ```text
 Z_dut(f) = Zin(f) · (1 - H_cal(f)) / H_cal(f)
@@ -84,7 +84,7 @@ H_disp(f) = R_ref / (Z_dut(f) + R_ref)
 
 这样纯电阻 DUT 显示为 0 dB / 0°，RC/RL/RLC 显示的是它们相对 `R_ref` 的真实衰减与相移。详细推导、标准件清单和局限性见 [`skill/DE_EMBED_METHOD.md`](skill/DE_EMBED_METHOD.md)。
 
-> 注：`skill/DE_EMBED_METHOD.md` 的标准件表是早期 13 行版本；当前 `data/input_network.json` 是 **2026-11-02 的 19 行 topology-aware 表**：16 行 series 标准件 + 3 行 shunt 标准件（`rc_lp_1k98n1`、`rl_hp_1k100m`、`rc_lp_3k2_9n56`）。分组校验与运行时行为见 [`report/hplane_topology_aware_20261102.md`](report/hplane_topology_aware_20261102.md)。
+> 注：`skill/DE_EMBED_METHOD.md` 的标准件表是早期 13 行版本；当前 `data/input_network.json` 是 **2026-11-02 的 22 行 topology-aware 表**：16 行 series 标准件 + 6 行 shunt 标准件（`rc_lp_1k98n1`、`rl_hp_1k100m`、`rc_lp_3k2_9n56`、`rc_lp_10k_1n`、`rl_hp_2k2_63m`、`rl_hp_4k7_43m`）。分组校验与运行时行为见 [`report/hplane_topology_aware_20261102.md`](report/hplane_topology_aware_20261102.md)。
 
 ---
 
@@ -140,7 +140,7 @@ PL（100 MHz）
 | 每点积分窗 | `N = periods · fs / f`，`periods = clamp(1000·f/fs, 10, 1000)`；20 Hz–20 kHz 实际约 10–410 个周期 |
 | 解调输出 | 48 位有符号 `acc_I` / `acc_Q`，AXI GPIO 分低 32 位 + 高 16 位读取 |
 | 校准表 | `data/calibration_table.json`，format 2，240 个 direct 频点 |
-| 输入网络表 | `data/input_network.json`，format 3，19 行（16 series + 3 shunt），`meta.table_kind=topology_aware`，`R_ref ≈ 10989 Ω` |
+| 输入网络表 | `data/input_network.json`，format 3，22 行（16 series + 6 shunt），`meta.table_kind=topology_aware`，`R_ref ≈ 10989 Ω` |
 | 识别类别 | 当前模型 5 类：RC 低通/高通、RL 低通/高通、RLC 带通 |
 | 网页 | Flask + 本地 Plotly，默认端口 5000 |
 
@@ -172,7 +172,7 @@ PL（100 MHz）
 | 短接重复性 | 20 kHz 0.00 dB / 0.00°；全频段相位约 −0.02…+0.07° |
 | 9.8 mH + 11.6 kΩ @ 20 kHz | −6.28 dB / −3.14°，理论模型 −6.28 dB / −3.12° |
 | 旧 14 行 H 平面误差（2026-10） | 幅度 rms 0.07–0.55 dB（max 1.91 dB）；相位 rms 0.69–4.14°（max 10.04°） |
-| 新 19 行 topology-aware H 平面 in-sample（2026-11-02） | 幅度 rms 均值 0.010 dB（max 0.070 dB）；相位 rms 均值 0.044°（max 0.177°） |
+| 新 22 行 topology-aware H 平面 in-sample（2026-11-02） | 幅度 rms 均值 0.010 dB（max 0.070 dB）；相位 rms 均值 0.065°（max 0.246°） |
 | 数据集 | 5 类 × 30 条 = 150 条真实扫频曲线，每条 240 点 |
 | 分类 | 按类别分层抽 20% 测试；决策树 100.00%，MLP 100.00% |
 | 资源占用 | 656 LUT（1%）、268 FF（<1%）、2 DSP（1%） |
@@ -185,9 +185,9 @@ PL（100 MHz）
 
 ![历史 14 行 H 平面误差（2026-10）](report/hplane_14rows_errors.png)
 
-上图和 [`report/hplane_14rows_errors.md`](report/hplane_14rows_errors.md) 是 2026-10 的历史 14 行版本，仅用于对照，不代表当前 19 行表。当前拓扑分组表的建立与校验见 [`report/hplane_topology_aware_20261102.md`](report/hplane_topology_aware_20261102.md)。
+上图和 [`report/hplane_14rows_errors.md`](report/hplane_14rows_errors.md) 是 2026-10 的历史 14 行版本，仅用于对照，不代表当前 22 行表。当前拓扑分组表的建立与校验见 [`report/hplane_topology_aware_20261102.md`](report/hplane_topology_aware_20261102.md)。
 
-> 当前 `data/input_network.json` 是 **2026-11-02 的 19 行 topology-aware 表**：16 行 series + 新增 3 行 shunt（`rc_lp_1k98n1`、`rl_hp_1k100m`、`rc_lp_3k2_9n56`），并用当前短接表重建。默认 series 去嵌入只读 series 子表；旧 `hplane_14rows_errors` 图/报告保留为历史版本。
+> 当前 `data/input_network.json` 是 **2026-11-02 的 22 行 topology-aware 表**：16 行 series + 6 行 shunt（`rc_lp_1k98n1`、`rl_hp_1k100m`、`rc_lp_3k2_9n56`、`rc_lp_10k_1n`、`rl_hp_2k2_63m`、`rl_hp_4k7_43m`），并用当前短接表重建。默认 series 去嵌入只读 series 子表；旧 `hplane_14rows_errors` 图/报告保留为历史版本。
 
 ### 3.3 资源与时序报告
 
@@ -234,7 +234,7 @@ intergrated_strategies/
 │  └─ dashboard/               # Flask 后端、Plotly 前端、演示 CSV
 ├─ data/
 │  ├─ calibration_table.json   # 某次实测短接校准表（环境相关快照）
-│  ├─ input_network.json       # 19 行 topology-aware H 平面表
+│  ├─ input_network.json       # 22 行 topology-aware H 平面表
 │  ├─ history.csv              # 网页扫频历史（未校准 + 已校准）
 │  ├─ real/                    # 5 类 × 30 条实测曲线
 │  ├─ acceptance_latest.json   # 最近一次 RTL 验收记录
@@ -329,7 +329,7 @@ python -m diagnosis_system.dashboard.app
 > - 根目录：`acceptance.py`、`ps_ctrl.py`、`audio_loopback.py`、`run_dashboard.py`、`start_dashboard.sh`、`data/`、`board/`、`python_model/`、`diagnosis_system/`、`tools/` 等并列；`acceptance.py`/`ps_ctrl.py`/`audio_loopback.py` 在根目录与 `board/` 下各有一份同源副本，实际 import 时 `board/` 副本在 `sys.path` 中更靠前。
 > - `data/history.csv`：119,040 行 / 496 个 sweep，每个 240 点，全部 `pynq_rtl`。
 > - `data/calibration_table.json`：240 个 `direct` 频点，`created=2026-10-29T06:22:18`，`repeat=1`，`dac_volume=16`。
-> - `data/input_network.json`：19 行 topology-aware 表，`R_ref≈10989`，与仓库版本数值一致。
+> - `data/input_network.json`：22 行 topology-aware 表，`R_ref≈10989`，与仓库版本数值一致。
 > - `data/real/`：5 类 × 30 条（板端是 2026-10-28 采集批次，数值与仓库后续快照可能略有差异）。
 > - dashboard 正在运行；浏览器访问 `:5000`，Jupyter `9090` 独立运行。
 >
@@ -499,7 +499,7 @@ _run_rtl_hardware_sweep()
   → 240 点对数扫频，每点按 build_period_schedule() 设频/设窗/启动/回读
   → calibration.calc_mag_phase(acc_I, acc_Q, N)
   → calibration.apply_calibration(..., path="direct")
-  → apply_calibration 内部调用 input_network.deembed_complex()（19 行 topology-aware 表，默认 series 子表）
+  → apply_calibration 内部调用 input_network.deembed_complex()（22 行 topology-aware 表，默认 series 子表）
   → 返回 mag_db / phase_deg / AI 结果
 ```
 
@@ -609,7 +609,7 @@ rl_highpass : H = Zp/(R+Zp)，Zp = Zl || Zin
 
 #### 2）准备标准件参数
 
-模板见 [`tools/hplane_standards.example.json`](tools/hplane_standards.example.json)（历史 14 行），当前 19 行 topology-aware 表使用 [`tools/hplane_standards.20261102.json`](tools/hplane_standards.20261102.json)。字段：
+模板见 [`tools/hplane_standards.example.json`](tools/hplane_standards.example.json)（历史 14 行），当前 22 行 topology-aware 表使用 [`tools/hplane_standards.20261102.json`](tools/hplane_standards.20261102.json)。字段：
 
 | 字段 | 说明 |
 |---|---|
@@ -639,7 +639,7 @@ cd /home/xilinx/jupyter_notebooks/project
   --output /tmp/input_network.built.json
 ```
 
-> 2026-11-02 已用当前短接表重建为 19 行 topology-aware 表：16 行 series + 3 行 shunt；in-sample 均值 0.010 dB / 0.044°，校验见 `report/hplane_topology_aware_20261102.md`。
+> 2026-11-02 已用当前短接表重建为 22 行 topology-aware 表：16 行 series + 6 行 shunt；in-sample 均值 0.010 dB / 0.065°，校验见 `report/hplane_topology_aware_20261102.md`。
 
 ```bash
 # PC（仓库根目录，numpy 即可）
@@ -675,11 +675,11 @@ python3 -m unittest tests.test_build_hplane -v
 
 H 平面表的每一行都依赖“当时的短接表 × 当时的原始扫频”。如果短接表与 sweep 来自不同 session，`H` 会出现 `|H| > 1`、`Zin` 实部为负或校验警告。
 
-当前 19 行 topology-aware 表的情况：
+当前 22 行 topology-aware 表的情况：
 
 - `data/history.csv` 是多 session 汇总，当前板端 496 个 sweep；
 - 当前短接表为 `created=2026-10-29T06:22:18`、`repeat=1`；
-- 12 组原始标准件来自 10/27–10/28 旧 session；`rl41m_3k87`、`rlrc1k98`、`rc0n956_9k9`、`rl22m_6k86`、`rc_lp_1k98n1`、`rl_hp_1k100m`、`rc_lp_3k2_9n56` 来自近期 session。
+- 12 组原始标准件来自 10/27–10/28 旧 session；`rl41m_3k87`、`rlrc1k98`、`rc0n956_9k9`、`rl22m_6k86`、`rc_lp_1k98n1`、`rl_hp_1k100m`、`rc_lp_3k2_9n56`、`rc_lp_10k_1n`、`rl_hp_2k2_63m`、`rl_hp_4k7_43m` 来自近期 session。
 
 因此当前表是“混合 session 的在线表”，in-sample 校验只能说明建表链路自洽，不能证明对未知 DUT 的泛化误差。要做严格版本：
 
@@ -766,7 +766,7 @@ bash board/cal_toggle.sh all      # 直连/缓冲都启用
 
 1. **类别覆盖有限**：当前模型只有 5 类（RC/RL 低通/高通、RLC 带通）；`opamp_lowpass` 是代码中的第 6 类占位，没有实测数据。分类准确率 100% 只针对同环境 150 条曲线的 80/20 划分，不是跨设备泛化指标。
 2. **校准表是环境快照**：`data/calibration_table.json` 和 `data/input_network.json` 依赖短接帧相位、线缆、标准件容差、DAC 音量和温度。换环境时先停 dashboard，执行 `sudo bash board/start_pl_i2s.sh --force`，再用网页做一次“一键短接校准”；H 平面表在夹具不变时可以复用，但更换夹具/线缆后需要重建。
-3. **H 平面表是“短接表 + 标准件 sweep”的联合快照**：每一行都对应建表时使用的短接表。当前 19 行表混用了 12 组旧 session 标准件和 7 组近期标准件，因此 in-sample 校验只证明建表链路自洽；要做严格版本，应在当前 persistent session 下重扫全部标准件，不要用旧 raw + 当前短接表拼表。脚本会打印 `|H|>1`/session 警告，不要用调参掩盖配对问题。
+3. **H 平面表是“短接表 + 标准件 sweep”的联合快照**：每一行都对应建表时使用的短接表。当前 22 行表混用了 12 组旧 session 标准件和 10 组近期标准件，因此 in-sample 校验只证明建表链路自洽；要做严格版本，应在当前 persistent session 下重扫全部标准件，不要用旧 raw + 当前短接表拼表。脚本会打印 `|H|>1`/session 警告，不要用调参掩盖配对问题。
 4. **近短路病态**：`|H|` 接近 1 时 `Z_dut = Zin(1-H)/H` 会放大误差；代码在 `|H| > 0.999` 时直接返回原 H。纯电感等低阻 DUT 的短接判据也可能放行，需要更细的绝对门限。
 5. **频率与拓扑限制**：20 Hz–20 kHz 覆盖音频范围内的 RC/RL/RLC，但不适合高频/射频或大功率电路；测量是单端两线方式，不是四线开尔文，夹具寄生会进入结果。
 6. **演示数据只有 20 点**：`data/dataset_rc_lpf.csv` 是保留的真机片段，PC 页面只画 20 点；完整 240 点演示曲线在 `diagnosis_system/dashboard/data_rc_lpf.csv`，可按 5.2 的说明替换。相应地，`tests/test_dashboard_api.py` 的 240 点断言也要在替换后才通过。
@@ -787,7 +787,7 @@ bash board/cal_toggle.sh all      # 直连/缓冲都启用
 | [`report/hplane_current_short_20261102.md`](report/hplane_current_short_20261102.md) | 当前短接表套 14 组标准件的幅相误差分析 |
 | [`report/hplane_rebuild_20261102.md`](report/hplane_rebuild_20261102.md) | 新 RL/RLC 加入后的 H 平面表重建与校验 |
 | [`report/hplane_16rows_20261102.md`](report/hplane_16rows_20261102.md) | 16 行 H 平面表（新增 9.9k+0.956nF RC、6.86k+22mH RL）与校验 |
-| [`report/hplane_topology_aware_20261102.md`](report/hplane_topology_aware_20261102.md) | 19 行 topology-aware H 平面表（16 series + 3 shunt）与分组校验 |
+| [`report/hplane_topology_aware_20261102.md`](report/hplane_topology_aware_20261102.md) | 22 行 topology-aware H 平面表（16 series + 6 shunt）与分组校验 |
 | [`report/ml_training_note.md`](report/ml_training_note.md) | 实测数据训练报告与混淆矩阵 |
 | [`tools/build_hplane.py`](tools/build_hplane.py) | H 平面建表 CLI（自动读 `data/calibration_table.json`） |
 | [`tools/hplane_standards.example.json`](tools/hplane_standards.example.json) | 14 只标准件的实测参数/sweep_id 模板 |

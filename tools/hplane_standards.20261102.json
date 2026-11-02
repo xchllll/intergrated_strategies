@@ -1,5 +1,5 @@
 {
-  "note": "2026-11-02 topology-aware table: 16 series + 3 shunt standards",
+  "note": "2026-11-02 topology-aware table: 16 series + 6 shunt standards",
   "standards": [
     {
       "label": "97k2",
@@ -128,8 +128,8 @@
       "topology": "rl_highpass",
       "R": "1k",
       "L": "100m",
-      "sweep": "20261029-075745-125400",
-      "note": "2026-11-02: 1k + 100mH, RL highpass (R series, L shunt)"
+      "sweep": "20261029-082449-112104",
+      "note": "2026-11-02: 1k + 100mH, RL highpass (R series, L shunt); redone sweep"
     },
     {
       "label": "rc_lp_3k2_9n56",
@@ -138,6 +138,30 @@
       "C": "9.56n",
       "sweep": "20261029-075937-558912",
       "note": "2026-11-02: 3.2k + 9.56nF, RC lowpass"
+    },
+    {
+      "label": "rc_lp_10k_1n",
+      "topology": "rc_lowpass",
+      "R": "10k",
+      "C": "1n",
+      "sweep": "20261029-081720-588200",
+      "note": "2026-11-02: 10k + 1nF, RC lowpass"
+    },
+    {
+      "label": "rl_hp_2k2_63m",
+      "topology": "rl_highpass",
+      "R": "2.2k",
+      "L": "63m",
+      "sweep": "20261029-081427-311763",
+      "note": "2026-11-02: 2.2k + 63mH (67mH measured 63mH), RL highpass"
+    },
+    {
+      "label": "rl_hp_4k7_43m",
+      "topology": "rl_highpass",
+      "R": "4.7k",
+      "L": "43m",
+      "sweep": "20261029-082219-202819",
+      "note": "2026-11-02: 4.7k + 43mH (47mH measured 43mH), RL highpass"
     }
   ]
 }
