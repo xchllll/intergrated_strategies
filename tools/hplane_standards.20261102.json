@@ -1,5 +1,5 @@
 {
-  "note": "2026-11-02 rebuild: 12 old standards + new RL rl41m_3k87 + new RLC rlrc1k98 sweep",
+  "note": "2026-11-02: 14-row H-plane table plus 9.9k+0.956nF RC and 6.86k+22mH RL",
   "standards": [
     {
       "label": "97k2",
@@ -98,6 +98,22 @@
       "C": "98.11n",
       "sweep": "20261029-033305-332303",
       "note": "new RLC sweep under current persistent short session"
+    },
+    {
+      "label": "rc0n956_9k9",
+      "topology": "series_rc",
+      "R": "9.9k",
+      "C": "0.956n",
+      "sweep": "20261029-063706-940664",
+      "note": "added 2026-11-02: 9.9k + 0.956nF, latest scan"
+    },
+    {
+      "label": "rl22m_6k86",
+      "topology": "series_rl",
+      "R": "6.86k",
+      "L": "22m",
+      "sweep": "20261029-064125-140960",
+      "note": "added 2026-11-02: 6.86k + 22mH, latest scan"
     }
   ]
 }
