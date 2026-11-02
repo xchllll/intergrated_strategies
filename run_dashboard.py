@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Dashboard launcher.
+"""Dashboard launcher (persistent-PL mode).
 
-启动时只在主线程加载 codec/PL（pynq 的 Overlay 需要主线程 asyncio loop），
-**不再自动跑参考扫频**。短接参考扫频由网页角落的“参考扫频”按钮触发
-（POST /api/start_reference），后台线程跑一轮 240 点，扫完才替换校准表。
+The PL/I2S/Codec bring-up is done once after each board power-on by:
+
+    sudo bash board/start_pl_i2s.sh
+
+This launcher only starts Flask.  It deliberately does not load the overlay,
+configure the codec, or touch the I2S stream; dashboard restarts therefore
+leave the Codec frame state untouched.
 """
 import os
 import sys
@@ -27,8 +31,9 @@ sys.path.insert(0, os.path.join(PROJECT, "board"))
 from diagnosis_system.dashboard import app as app_mod  # noqa: E402
 
 if __name__ == "__main__":
-    print("[startup] loading codec/PL in main thread ...", flush=True)
-    app_mod._ensure_rtl_design()
-    print("[startup] dashboard ready; click '参考扫频' on the page to align the short",
-          flush=True)
+    print("[startup] dashboard only; PL/I2S must already be running", flush=True)
+    if not app_mod._persistent_pl_ready():
+        print("[startup] WARNING: /tmp/pl_i2s_ready.json missing or stale;",
+              flush=True)
+        print("[startup] run: sudo bash board/start_pl_i2s.sh", flush=True)
     app_mod.app.run(host="0.0.0.0", port=5000, debug=False, threaded=False)

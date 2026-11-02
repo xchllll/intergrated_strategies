@@ -18,6 +18,10 @@ ROOT_DIR = BOARD_DIR.parent if (BOARD_DIR.parent / "python_model").is_dir() else
 BIT_PATH = BOARD_DIR / "design_1_wrapper.bit"
 XSA_PATH = BOARD_DIR / "design_1_wrapper.xsa"
 DEFAULT_OUTPUT = ROOT_DIR / "data" / "acceptance_latest.json"
+# Any code path that loads a new bitstream invalidates the dashboard's
+# persistent-PL marker.  board/start_pl_i2s.py writes it again after a
+# successful bring-up; plain acceptance/calibrate_path runs leave it absent.
+PL_READY_MARKER = Path("/tmp/pl_i2s_ready.json")
 
 sys.path.insert(0, str(BOARD_DIR))
 sys.path.insert(0, str(ROOT_DIR / "python_model"))
@@ -126,9 +130,14 @@ def configure_codec_direct() -> dict:
 def configure_codec() -> dict:
     """Initialize ADAU1761 while the BaseOverlay AXI-IIC is still present."""
     import fcntl
-    from pathlib import Path
 
     from pynq import Overlay
+
+    # Loading base.bit reconfigures PL; any persistent-PL claim is stale now.
+    try:
+        PL_READY_MARKER.unlink()
+    except FileNotFoundError:
+        pass
 
     base_package = Path(__import__("pynq.overlays.base", fromlist=["base"]).__file__)
     base = Overlay(str(base_package.parent / "base.bit"))
@@ -175,6 +184,14 @@ def configure_codec() -> dict:
 def load_design(bit_path: Path, clock_hz: float) -> dict:
     from pynq import Overlay
     from pynq.ps import Clocks
+
+    # A new Overlay download resets PL and stops the persistent I2S frame.
+    # Invalidate the marker before touching hardware; start_pl_i2s.py writes a
+    # fresh marker only after the reconfiguration and I2S restart succeed.
+    try:
+        PL_READY_MARKER.unlink()
+    except FileNotFoundError:
+        pass
 
     design_path = bit_path
     if bit_path.suffix.lower() == ".bit":

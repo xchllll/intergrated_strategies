@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import math
 import os
 import platform
@@ -35,6 +37,12 @@ AUDIO_LOOPBACK_DRIVER = None
 
 # 【修复 3】全局标志位：保证自定义 bitstream 只在第一次扫频时烧录
 _RTL_DESIGN_LOADED = False
+
+# 持久化 PL/I2S：板子启动后由 board/start_pl_i2s.sh 一次性加载；
+# dashboard 重启时只校验 marker，不再碰 Overlay/Codec/I2S。
+PL_READY_MARKER = Path("/tmp/pl_i2s_ready.json")
+PL_XSA = ROOT_DIR / "board" / "design_1_wrapper.xsa"
+PL_BIT = ROOT_DIR / "board" / "design_1_wrapper.bit"
 
 
 def _runtime_source(mode: str = "rtl") -> dict:
@@ -122,16 +130,42 @@ def _log_spaced_freqs(start_hz: float, stop_hz: float, count: int) -> list[float
     return [start_hz * ratio**index for index in range(count)]
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _persistent_pl_ready() -> bool:
+    """检查 board/start_pl_i2s.sh 是否已把 PL/I2S 拉起来。
+
+    只读 marker + XSA 哈希，不加载 PL、不配置 Codec、不写任何硬件。
+    """
+    try:
+        info = json.loads(PL_READY_MARKER.read_text(encoding="utf-8"))
+        return (
+            bool(info.get("ok"))
+            and info.get("xsa_sha256") == _sha256(PL_XSA)
+            and info.get("bit_sha256") == _sha256(PL_BIT)
+        )
+    except Exception:
+        return False
+
+
 def _ensure_rtl_design():
-    """【修复 3】防止每次扫频都重烧，只在第一次调用"""
+    """Dashboard 只附着到常驻 PL，不负责加载 bitstream 或启动 I2S。"""
     global _RTL_DESIGN_LOADED
     if _RTL_DESIGN_LOADED:
         return
-    import acceptance
-    # 顺序绝对不能反：configure_codec 会加载 base.bit，把自定义设计冲掉
-    acceptance.configure_codec()
-    acceptance.load_design(acceptance.ensure_bitstream(), 1e8)
-    _RTL_DESIGN_LOADED = True
+    if _persistent_pl_ready():
+        _RTL_DESIGN_LOADED = True
+        return
+    raise RuntimeError(
+        "常驻 PL/I2S 尚未初始化。请先停止 dashboard，在板端执行："
+        "sudo bash board/start_pl_i2s.sh；之后再启动 dashboard。"
+    )
 
 
 def _current_dac_volume():
