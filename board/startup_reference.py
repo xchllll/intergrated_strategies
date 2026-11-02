@@ -33,7 +33,6 @@ _STATE = {
     "message": "",
     "progress": 0,
     "total": 0,
-    "session_id": None,
 }
 
 # 0x10 is the acceptance.configure_codec default DAC volume (-6 dB).
@@ -50,15 +49,14 @@ def is_running():
         return bool(_STATE.get("running"))
 
 
-def run(repeat=1, n_target=1000, design_loaded=False, session_id=None):
+def run(repeat=1, n_target=1000, design_loaded=False):
     import calibration as cal
     import ps_ctrl
     from diagnosis_system.dashboard import app as app_mod
 
     with _LOCK:
         _STATE.update(running=True, done=False, error=None,
-                      message="正在进行相位对齐...", progress=0, total=0,
-                      session_id=session_id)
+                      message="正在进行相位对齐...", progress=0, total=0)
     try:
         if not design_loaded:
             app_mod._ensure_rtl_design()
@@ -148,7 +146,6 @@ def run(repeat=1, n_target=1000, design_loaded=False, session_id=None):
             "freq_points": len(freqs),
             "source": "dashboard startup reference (short, background)",
             "note": "short connected at dashboard start",
-            "session_id": session_id,
         }
         cal.save_calibration_table(cal.CAL_TABLE_DEFAULT_PATH)
 
@@ -156,8 +153,7 @@ def run(repeat=1, n_target=1000, design_loaded=False, session_id=None):
         i20 = min(range(len(freqs)), key=lambda k: abs(freqs[k] - 20000.0))
         print("[ref] saved %d points -> %s" % (len(rows), cal.CAL_TABLE_DEFAULT_PATH),
               flush=True)
-        print("[ref] 1k phase_offset=%.2f deg | 20k phase_offset=%.2f deg "
-              "(table values; sign/state is per session)"
+        print("[ref] 1k off=%.2f deg | 20k off=%.2f deg (short expected ~-86)"
               % (rows[i1][cal.CAL_PATH_DIRECT]["phase_offset_deg"],
                  rows[i20][cal.CAL_PATH_DIRECT]["phase_offset_deg"]), flush=True)
         with _LOCK:

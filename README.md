@@ -6,7 +6,7 @@
 
 > 项目状态：测量链路、短接校准、输入网络去嵌入、机器学习拓扑识别与网页展示已经打通；仓库内保留了某次可用环境下的实测数据、校准表和验收记录，便于复现与对照。
 
-> **最短复现路径**：板端部署 → `bash start_dashboard.sh`（启动后自动做一轮短接参考扫频）→ 等页面提示相位对齐完成 → 换 DUT，点“开始扫频测量” → 看 Bode 曲线和 AI 结果。完整步骤见第五节；没有板子可先看 5.2 的 PC 演示。
+> **最短复现路径**：板端部署 → `bash start_dashboard.sh` → 接短接，点“参考扫频” → 换 DUT，点“开始扫频测量” → 看 Bode 曲线和 AI 结果。完整步骤见第五节；没有板子可先看 5.2 的 PC 演示。
 
 ---
 
@@ -34,7 +34,7 @@
 | 自适应积分窗 | 按 `N = periods·fs/f` 覆盖整数个信号周期，高频自动增加周期数，低频受下限保护 |
 | 帧边界对齐 | `top.v` 把 `ps_start` 锁存到 `rx_data_valid`，使每次测量的 DDS 相位从确定的 I2S 帧边界开始 |
 | 三层校准 | 短接复数校准 → 14 行 H 平面输入网络去嵌入 → 以 `R_ref` 为参考重新嵌入 |
-| 跨进程相位锚定 | 每次启动 dashboard 自动做一轮短接参考扫频，并把 `session_id` 写入校准表；参考未完成/失败时拒绝扫频，避免复用上一次进程的短接表（20 kHz 整采样偏差的典型来源） |
+| 跨进程相位锚定 | 每次启动 dashboard 后，用“参考扫频”重新测当前进程的短接表；否则 20 kHz 相位会因一个采样差 100° 以上 |
 | 双测量后端 | 自研 PL 解调链路（完整幅相）；PYNQ 官方音频闭环（幅值可用、相位无物理参考，用于最低档硬件自检） |
 | 跨版本模型 | 训练在 PC 上完成，导出为 JSON；板端 JSON 前向推理只用 numpy，避免 sklearn 版本耦合 |
 | 数据可追溯 | 网页扫频同时保存未校准与已校准值；`cal_applied`、`phase_valid`、`sweep_id` 等字段齐全 |
@@ -222,7 +222,6 @@ intergrated_strategies/
 ├─ python_model/
 │  ├─ calibration.py           # 幅相还原、短接校准、校准表读写
 │  ├─ input_network.py         # H 平面输入网络去嵌入
-│  ├─ short_alignment.py      # 短接表帧偏移估计/对齐（离线）
 │  └─ demod_sim.py             # 定点解调 Python 模型
 ├─ diagnosis_system/
 │  ├─ common/features.py       # 13 维频响特征
@@ -238,13 +237,12 @@ intergrated_strategies/
 ├─ tools/
 │  ├─ collect_dut.py            # 通过网页 API 采集 DUT 数据
 │  ├─ build_hplane.py           # 短接表 + 标准件扫频 + 万用表参数 → H 平面表
-│  ├─ short_compare.py          # 多张短接表的帧偏移对比/对齐
 │  └─ hplane_standards.example.json  # 14 只标准件的实测参数/sweep_id 模板
 ├─ tests/                       # 无硬件单测 / 资产检查 / 音频分析 / H 平面建表测试
 ├─ report/                      # 性能指标、资源/时序、H 平面误差、混淆矩阵
 ├─ docs/                       # 环境、寄存器映射、最低验收
 ├─ skill/                      # 开发过程中沉淀的可复用经验与去嵌入方法
-├─ run_dashboard.py            # 板端启动入口（加载 Codec/PL + 自动参考扫频）
+├─ run_dashboard.py            # 板端启动入口（主线程加载 Codec/PL）
 └─ start_dashboard.sh          # 板端后台启动脚本
 ```
 
@@ -324,11 +322,11 @@ python -m diagnosis_system.dashboard.app
 >
 > - 目录：`/home/xilinx/jupyter_notebooks/project`；不是 git 仓库，而是平铺部署。
 > - 根目录：`acceptance.py`、`ps_ctrl.py`、`audio_loopback.py`、`run_dashboard.py`、`start_dashboard.sh`、`data/`、`board/`、`python_model/`、`diagnosis_system/`、`tools/` 等并列；`acceptance.py`/`ps_ctrl.py`/`audio_loopback.py` 在根目录与 `board/` 下各有一份同源副本，实际 import 时 `board/` 副本在 `sys.path` 中更靠前。
-> - `data/history.csv`：106,080 行 / 442 个 sweep，每个 240 点，全部 `pynq_rtl`。
-> - `data/calibration_table.json`：240 个 `direct` 频点（本次实验结束时 `created=2026-10-28T23:24:17`，带当前进程 `session_id`），`dac_volume=16`。
+> - `data/history.csv`：102,720 行 / 428 个 sweep，每个 240 点，全部 `pynq_rtl`。
+> - `data/calibration_table.json`：240 个 `direct` 频点，`created=2026-10-28T19:18:53`，`dac_volume=16`。
 > - `data/input_network.json`：14 行，`R_ref=10986`，与仓库版本数值一致。
 > - `data/real/`：5 类 × 30 条（板端是 2026-10-28 采集批次，数值与仓库后续快照可能略有差异）。
-> - 启动后 dashboard 监听 `:5000`，加载 PL/Codec 后自动做短接参考扫频；参考完成前扫频接口返回 409。
+> - 检查时 dashboard 进程未运行；Jupyter `9090` 正常，启动 dashboard 后浏览器访问 `:5000`。
 >
 > 因此当前板子**不要重新 clone 覆盖** `project`；更新时用 `scp` 只同步目标文件（例如 `tools/build_hplane.py` → `project/tools/`）。修改根目录与 `board/` 的同名驱动时请同步两份，避免“改了 `board/` 但根目录还是旧版”或反之。
 
@@ -388,15 +386,12 @@ bash start_dashboard.sh
 tail -n 30 /tmp/dashboard.log
 ```
 
-看到类似下面的内容即表示 PL/Codec 已加载，并且已经自动开始短接参考扫频：
+看到类似下面的内容即表示 PL/Codec 加载完成：
 
 ```text
 [startup] loading codec/PL in main thread ...
-[startup] auto short-reference sweep started; wait for phase alignment ...
-[startup] dashboard ready; sweep is blocked until reference is done
+[startup] dashboard ready; click '参考扫频' on the page to align the short
 ```
-
-参考扫频约 20 s。完成后页面会显示“相位对齐完成”，之后才允许“开始扫频测量”。如果启动时接的不是短接，参考会失败，页面会提示先接短接再手动点“参考扫频”；在此之前扫频接口会返回 409，不会用旧表写历史。
 
 浏览器打开：
 
@@ -425,27 +420,17 @@ http://192.168.2.99:5000
 
 Codec 的 DAC/ADC 帧相位在每次 `configure_codec + load_design` 后不一定相同，跨进程可能差一个采样（20.48 µs）。在 20 kHz 处，一个采样就对应约 147° 的相位误差。`top.v` 的 `start_pending + rx_data_valid` 已经把**进程内**的启动点对齐到帧边界，但**跨进程**仍需要用当前进程的短接重新锚定。
 
-现在 `run_dashboard.py` 在加载 PL/Codec 后**自动启动**一轮短接参考扫频；参考完成前 `/api/start_sweep` 返回 409，不会用上一次进程的旧表。因此：
+因此：
 
-> **启动 dashboard 时保持短接，等自动参考完成后再换 DUT。** 如果启动时接的是 DUT，自动参考会失败；接回短接后手动点“参考扫频”即可。
+> **每次重启 dashboard 后，先接短接，点一次“参考扫频”，再换 DUT 测量。不要直接复用上一次进程的相位基准。**
 
-#### 3）自动参考与手动补做
+#### 3）执行参考扫频
 
-正常启动流程：
-
-1. 保持短接，执行 `bash start_dashboard.sh`；
-2. 后台自动做 240 点参考扫频（`n_target=1000`，约 20 秒）；
-3. 页面显示“相位对齐完成”后，“开始扫频测量”才可用；
-4. 参考成功后校准表 meta 会写入当前进程的 `session_id`，扫频前会校验这个 ID。
-
-如果自动参考失败（例如启动时接的是 DUT，或短接接触不良）：
-
-1. 接好 0 Ω 短接；
-2. 点右下角“参考扫频”；
-3. 等待约 20 秒，页面提示“相位对齐完成”；
-4. 再换 DUT 测量。
-
-后台只在 240 点全部成功后才原子替换 `data/calibration_table.json`；中途失败会保留旧表，同时继续阻止扫频，避免把旧 session 的相位写进 `history.csv`。
+1. 保持短接，打开网页；
+2. 点击右下角“参考扫频”；
+3. 等待约 20 秒（240 点，`n_target=1000`）；
+4. 页面提示“相位对齐完成”，并禁用按钮直到结束；
+5. 后台只在 240 点全部成功后才原子替换 `data/calibration_table.json`；中途失败会保留旧表。
 
 参考扫频会用前 5 个频点（约 20–22.5 Hz）做“是否短接”的绝对幅度判据（0.98–1.02，按 DAC 音量归一化）。如果接着 DUT 点参考，通常会直接报“检测到不是短接”。
 
@@ -718,8 +703,7 @@ RTL 仿真：
 | I/Q 接近 0、耳机无声 | Codec 静音/混音器/电源管理没配好，或音频线没接好；先跑 `acceptance.py --backend audio_loopback` 验证物理回路，再检查 `configure_codec()` |
 | 参考扫频报“检测到不是短接” | 夹具上还接着 DUT；先换成 0 Ω 短接。若短接仍被拒，检查旧表 `dac_volume` 与当前音量，必要时备份旧表后重跑 |
 | 建表时出现 abs(H)>1 / 校验误差大 | 短接表与标准件 sweep 不是同一次 session；换回当时的短接表，或按 5.8 重新采标准件，不要调参掩盖 |
-| 重启后 20 kHz 相位整体偏移 | 新版本启动会自动参考扫频；先看 `/api/status` 的 `reference.error`。若自动参考失败，接 0 Ω 短接后手动点“参考扫频”；若仍用旧表，`start_sweep` 会因 `session_id` 不匹配返回 409，不会把 130° 写进 history |
-| 开始扫频返回 409 “参考扫频尚未完成” | 这是预期的保护：等自动参考完成，或接短接手动点“参考扫频”；参考失败时不要绕过 |
+| 重启后 20 kHz 相位整体偏移 | 没有做当前进程的参考扫频；每次重启后必须重测短接。另确认 XSA 中 MCLK=25 MHz、`CONVERTER0=0x06` |
 | 5000 端口被占用 | 用 `sudo ss -ltnp` 查看监听进程；`start_dashboard.sh` 会清理旧进程，也可 `sudo pkill -f run_dashboard.py` |
 | 校准表/历史写入失败 | dashboard 以 root 运行，生成文件可能属于 root；必要时 `sudo chown -R xilinx:xilinx data`，或统一用 root 跑板端脚本 |
 | Windows 点“参考扫频”报错 | 该按钮只适用于板端；PC 演示只需“开始扫频测量” |
@@ -765,11 +749,6 @@ bash board/cal_toggle.sh all      # 直连/缓冲都启用
 | [`report/ml_training_note.md`](report/ml_training_note.md) | 实测数据训练报告与混淆矩阵 |
 | [`tools/build_hplane.py`](tools/build_hplane.py) | H 平面建表 CLI（自动读 `data/calibration_table.json`） |
 | [`tools/hplane_standards.example.json`](tools/hplane_standards.example.json) | 14 只标准件的实测参数/sweep_id 模板 |
-| [`tools/short_compare.py`](tools/short_compare.py) | 多张短接表的帧偏移估计/对齐对比（离线工具） |
-| [`python_model/short_alignment.py`](python_model/short_alignment.py) | 整数/分数采样偏移估计与残差计算 |
-| [`report/short_alignment_test_20261102.md`](report/short_alignment_test_20261102.md) | 3 次重启短接表的软件对齐测试 |
-| [`report/short_stale_table_fix_20261102.md`](report/short_stale_table_fix_20261102.md) | 重启后 20 kHz −130° 旧表复用的修复与 3 轮验证 |
-| [`report/short_repeatability_20261102.md`](report/short_repeatability_20261102.md) | 短接参考重复性与 14 组标准件误差 |
 | [`tests/test_build_hplane.py`](tests/test_build_hplane.py) | 建表脚本的无硬件单测 |
 | [`skill/DE_EMBED_METHOD.md`](skill/DE_EMBED_METHOD.md) | 短接校准、H 平面、`R_ref` 重嵌入的完整推导 |
 | [`skill/README.md`](skill/README.md) | 项目沉淀的 50 条 FPGA/PYNQ 工程技能 |
@@ -781,11 +760,11 @@ bash board/cal_toggle.sh all      # 直连/缓冲都启用
 ## 附：复现检查清单
 
 - [ ] 板端能 `import pynq`，Python 来自 `/usr/local/share/pynq-venv/bin/python3`
-- [ ] `bash start_dashboard.sh` 后 `/tmp/dashboard.log` 出现 `dashboard ready`，并自动开始参考扫频
+- [ ] `bash start_dashboard.sh` 后 `/tmp/dashboard.log` 出现 `dashboard ready`
 - [ ] 页面右上角显示“自研 PL 解调实测”，不是“演示数据”
-- [ ] 启动时保持短接，自动“参考扫频”约 20 s 完成，`data/calibration_table.json` 有 240 个 direct 频点且 `meta.session_id` 等于 `/api/status` 的 `session_id`
+- [ ] 接短接后“参考扫频”约 20 s 完成，`data/calibration_table.json` 有 240 个 direct 频点
 - [ ] `board/acceptance.py --backend rtl` 输出 `passed=True`，并写入 `data/acceptance_latest.json`
 - [ ] 短接扫频在 20 kHz 约为 0 dB / 0°，全频段相位平坦
 - [ ] 重建 H 平面表时短接表与标准件 sweep 同 session，校验无 >3 dB / 20° 警告
 - [ ] 换上 DUT 后，幅频/相频曲线符合预期，AI 返回拓扑与置信度
-- [ ] 启动时自动参考完成后再测 DUT；若自动参考失败，接短接手动补做
+- [ ] 每次重启 dashboard 后重新做参考扫频，再测 DUT
