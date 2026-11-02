@@ -767,6 +767,7 @@ bash board/cal_toggle.sh all      # 直连/缓冲都启用
 | [`docs/minimum_acceptance.md`](docs/minimum_acceptance.md) | 最低档验收标准、接线、音频引脚依据 |
 | [`report/performance_metrics.md`](report/performance_metrics.md) | 扫频、重复性、校准、分类与验收指标汇总 |
 | [`report/hplane_14rows_errors.md`](report/hplane_14rows_errors.md) | 14 行 H 平面逐行误差 |
+| [`report/hplane_current_short_20261102.md`](report/hplane_current_short_20261102.md) | 当前短接表套 14 组标准件的幅相误差分析 |
 | [`report/ml_training_note.md`](report/ml_training_note.md) | 实测数据训练报告与混淆矩阵 |
 | [`tools/build_hplane.py`](tools/build_hplane.py) | H 平面建表 CLI（自动读 `data/calibration_table.json`） |
 | [`tools/hplane_standards.example.json`](tools/hplane_standards.example.json) | 14 只标准件的实测参数/sweep_id 模板 |
