@@ -122,6 +122,43 @@
             background: linear-gradient(135deg, #2b8a5a, #1f6e47);
             box-shadow: 0 6px 14px rgba(31, 110, 71, 0.28);
         }
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(20, 38, 56, 0.48);
+        }
+        .modal-backdrop[hidden] { display: none; }
+        .modal {
+            width: min(460px, 100%);
+            padding: 24px;
+            border-radius: 16px;
+            background: #fff;
+            box-shadow: 0 24px 60px rgba(20, 38, 56, 0.28);
+        }
+        .modal h2 { margin: 0 0 10px; font-size: 20px; }
+        .modal p { margin: 8px 0; font-size: 14px; line-height: 1.6; }
+        .modal .warn { color: #8a4b08; background: #fff4e2; padding: 10px 12px; border-radius: 8px; }
+        .modal label { display: flex; align-items: center; gap: 10px; margin: 16px 0 8px; font-weight: 650; }
+        .modal input[type="number"] {
+            width: 92px;
+            padding: 8px 10px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            font-size: 15px;
+        }
+        .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+        .modal-actions button { min-width: 110px; }
+        .modal-actions .secondary {
+            color: var(--ink);
+            background: #eef2f7;
+            box-shadow: none;
+        }
+        .modal-error { min-height: 20px; color: #b42318; font-size: 13px; }
         .notice {
             margin: 14px 0 0;
             padding: 11px 14px;
@@ -205,7 +242,25 @@
         </aside>
     </section>
 </main>
-<button id="ref-btn" class="ref-btn" type="button" onclick="startReference()">参考扫频</button>
+<button id="cal-btn" class="ref-btn" type="button" onclick="openShortCalibration()">一键短接校准</button>
+
+<div id="cal-modal" class="modal-backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cal-modal-title">
+        <h2 id="cal-modal-title">一键短接校准</h2>
+        <p class="warn">请确认当前 HP/MIC 与 LINE IN 之间接的是 <strong>0 Ω 短接</strong>，不是被测电路。</p>
+        <p>校准会启动多轮完整扫频，并对原始幅相做复数平均；校准数据不会写入 history.csv。</p>
+        <label for="cal-repeat">扫频轮次
+            <input id="cal-repeat" type="number" min="1" max="10" step="1" value="3">
+        </label>
+        <p class="muted">轮次越多越稳定，但耗时按轮次线性增加（单轮约 20 秒）。</p>
+        <p id="cal-modal-error" class="modal-error"></p>
+        <div class="modal-actions">
+            <button type="button" class="secondary" onclick="closeShortCalibration()">取消</button>
+            <button id="cal-confirm" type="button" onclick="confirmShortCalibration()">确认校准</button>
+        </div>
+    </div>
+</div>
+
 <script src="/static/dashboard.js"></script>
 </body>
 </html>

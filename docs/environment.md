@@ -23,20 +23,20 @@
 ## 复现步骤
 
 ```bash
-# 1) 板端启动 dashboard（自动加载 codec/PL）
+# 1) 板子上电后一次性拉起常驻 PL/I2S
 cd /home/xilinx/jupyter_notebooks/project
+sudo bash board/start_pl_i2s.sh
+
+# 2) 启动 dashboard（只启动 Flask，不再加载 PL）
 bash start_dashboard.sh
 # 浏览器打开 http://<板子IP>:5000
 
-# 2) 接短接，网页右下角点“参考扫频”（或 bash start_dashboard_ref.sh）
-
-# 3) 重新标定（可选）
-python3 board/calibrate_path.py
+# 3) 接 0 Ω 短接，网页右下角点“一键短接校准”，输入扫频轮次
 
 # 4) 采 DUT 数据
-python3 tools/collect_dut.py
+python3 tools/collect_dut.py --label rc_lowpass --count 30
 ```
 
 ## 校准相关文件的可变性
 
-`data/calibration_table.json`、`data/input_network.json` 和 `report/hplane_14rows_errors.md` 中的误差，都依赖**当次测量环境**（短接帧相位、线缆、标准件容差、温度）。换环境后数值会变，但可用同一套流程重新得到：短接参考 → 标准件原始扫频 → 重建 H 平面表 → `check_hplane.py` 复核。仓库保留的是某次可用环境下的快照，用于复现和对照，不是固定真值。
+`data/calibration_table.json`、`data/input_network.json` 和 `report/hplane_14rows_errors.md` 中的误差，都依赖**当次测量环境**（短接帧相位、线缆、标准件容差、温度）。换环境后数值会变，但可用同一套流程重新得到：一键短接校准 → 标准件原始扫频 → 重建 H 平面表 → `check_hplane.py` 复核。仓库保留的是某次可用环境下的快照，用于复现和对照，不是固定真值。

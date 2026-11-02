@@ -12,14 +12,14 @@ async function loadStatus() {
         const result = await response.json();
         if (result.status === 'success') {
             applyStatus(result.source, result.calibration);
-            applyReferenceStatus(result.reference);
+            applyShortCalibrationStatus(result.short_calibration);
         }
     } catch (error) {
         setNotice('无法读取后端状态：' + error.message, true);
     }
 }
 
-// 启动短接参考扫频期间轮询状态：禁用“开始扫频测量”并提示
+// 短接校准运行时轮询状态：禁用扫频按钮并显示进度
 document.addEventListener('DOMContentLoaded', () => {
     setInterval(loadStatus, 2000);
 });
@@ -47,57 +47,99 @@ function applyStatus(source, calibration) {
     document.getElementById('calibration-detail').textContent = calibration.message || '状态未知';
 }
 
-function applyReferenceStatus(reference) {
-    window.__lastReference = reference || {};
+function applyShortCalibrationStatus(shortCal) {
+    window.__lastShortCal = shortCal || {};
     const startBtn = document.getElementById('start-btn');
-    const refBtn = document.getElementById('ref-btn');
-    const running = !!(reference && reference.running);
+    const calBtn = document.getElementById('cal-btn');
+    const running = !!(shortCal && shortCal.running);
     if (startBtn) {
         if (running) {
             startBtn.disabled = true;
-            startBtn.textContent = '正在进行相位对齐...';
-            startBtn.title = reference.message || '短接参考扫频进行中';
-        } else if (startBtn.textContent === '正在进行相位对齐...') {
+            startBtn.textContent = '短接校准中...';
+            startBtn.title = shortCal.message || '一键短接校准进行中';
+        } else if (startBtn.textContent === '短接校准中...') {
             startBtn.disabled = false;
             startBtn.textContent = '开始扫频测量';
             startBtn.title = '';
         }
     }
-    if (refBtn) {
-        refBtn.disabled = running;
-        refBtn.textContent = running ? '参考扫频中...' : '参考扫频';
+    if (calBtn) {
+        calBtn.disabled = running;
+        calBtn.textContent = running ? '短接校准中...' : '一键短接校准';
     }
     if (running) {
-        setNotice(reference.message || '正在进行相位对齐（短接参考扫频），请稍候...', false);
-    } else if (reference && reference.error) {
-        setNotice('相位对齐失败：' + reference.error + '（仍使用旧校准表）', true);
-    } else if (reference && reference.done) {
-        setNotice('相位对齐完成，可以开始扫频。', false);
+        setNotice(shortCal.message || '正在进行一键短接校准，请保持短接...', false);
+    } else if (shortCal && shortCal.error) {
+        setNotice('短接校准失败：' + shortCal.error + '（校准表未改动）', true);
+    } else if (shortCal && shortCal.done) {
+        const points = shortCal.result && shortCal.result.points;
+        setNotice('短接校准完成' + (points ? '，共 ' + points + ' 点' : '') +
+                  '，校准表已更新。', false);
     }
 }
 
-async function startReference() {
-    const btn = document.getElementById('ref-btn');
-    if (btn) { btn.disabled = true; btn.textContent = '参考扫频中...'; }
-    try {
-        const response = await fetch('/api/start_reference', { method: 'POST' });
-        const result = await response.json();
-        if (result.status !== 'started') {
-            setNotice(result.msg || '参考扫频未能启动', true);
-        } else {
-            setNotice('参考扫频已启动（请保持短接），约 20 秒...', false);
-        }
-    } catch (error) {
-        setNotice('参考扫频启动失败：' + error.message, true);
+function openShortCalibration() {
+    if (window.__lastShortCal && window.__lastShortCal.running) {
+        setNotice('短接校准正在进行，请稍候...', false);
+        return;
     }
-    loadStatus();
+    const modal = document.getElementById('cal-modal');
+    const error = document.getElementById('cal-modal-error');
+    if (error) error.textContent = '';
+    if (modal) modal.hidden = false;
+    const input = document.getElementById('cal-repeat');
+    if (input) {
+        input.focus();
+        input.select();
+    }
 }
+
+function closeShortCalibration() {
+    const modal = document.getElementById('cal-modal');
+    if (modal) modal.hidden = true;
+}
+
+async function confirmShortCalibration() {
+    const input = document.getElementById('cal-repeat');
+    const error = document.getElementById('cal-modal-error');
+    const confirmBtn = document.getElementById('cal-confirm');
+    const repeat = parseInt(input ? input.value : '', 10);
+    if (!Number.isInteger(repeat) || repeat < 1 || repeat > 10) {
+        if (error) error.textContent = '扫频轮次必须是 1~10 的整数。';
+        return;
+    }
+    if (confirmBtn) confirmBtn.disabled = true;
+    if (error) error.textContent = '';
+    try {
+        const response = await fetch('/api/start_short_calibration', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ repeat })
+        });
+        const result = await response.json();
+        if (!response.ok || result.status !== 'started') {
+            throw new Error(result.msg || '后端未启动短接校准');
+        }
+        closeShortCalibration();
+        setNotice('一键短接校准已启动（' + repeat + ' 轮），请保持短接，约 ' +
+                  (repeat * 20) + ' 秒...', false);
+        loadStatus();
+    } catch (err) {
+        if (error) error.textContent = '启动失败：' + err.message;
+    } finally {
+        if (confirmBtn) confirmBtn.disabled = false;
+    }
+}
+
+document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeShortCalibration();
+});
 
 async function startSweep() {
     const button = document.getElementById('start-btn');
 
-    if (window.__lastReference && window.__lastReference.running) {
-        setNotice('正在进行相位对齐，请稍候...', false);
+    if (window.__lastShortCal && window.__lastShortCal.running) {
+        setNotice('正在进行一键短接校准，请稍候...', false);
         return;
     }
 

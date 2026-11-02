@@ -36,4 +36,15 @@ if __name__ == "__main__":
         print("[startup] WARNING: /tmp/pl_i2s_ready.json missing or stale;",
               flush=True)
         print("[startup] run: sudo bash board/start_pl_i2s.sh", flush=True)
+    else:
+        # PYNQ's MMIO/device discovery must be initialized in the main thread.
+        # The short-calibration worker runs in a background thread; without
+        # this, its first MMIO access raises "There is no current event loop".
+        try:
+            import ps_ctrl
+            ps_ctrl.read_done()
+            print("[startup] AXI GPIO/MMIO ready", flush=True)
+        except Exception as exc:
+            print("[startup] WARNING: AXI GPIO init failed: %s" % exc,
+                  flush=True)
     app_mod.app.run(host="0.0.0.0", port=5000, debug=False, threaded=False)

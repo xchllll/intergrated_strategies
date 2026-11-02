@@ -17,11 +17,6 @@ os.environ.setdefault("XILINX_XRT", "/usr")
 
 from flask import Flask, jsonify, render_template, request
 
-try:  # 启机短接参考扫频（可选模块；没有时不影响原功能）
-    import startup_reference
-except Exception:  # pragma: no cover
-    startup_reference = None
-
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "board"))
@@ -43,6 +38,20 @@ _RTL_DESIGN_LOADED = False
 PL_READY_MARKER = Path("/tmp/pl_i2s_ready.json")
 PL_XSA = ROOT_DIR / "board" / "design_1_wrapper.xsa"
 PL_BIT = ROOT_DIR / "board" / "design_1_wrapper.bit"
+
+# 一键短接校准的后台状态；不再有“参考扫频”。
+SHORT_CAL_MAX_ROUNDS = 10
+_SHORT_CAL_LOCK = threading.Lock()
+_SHORT_CAL_STATE = {
+    "running": False,
+    "done": False,
+    "error": None,
+    "message": "",
+    "progress": 0,
+    "total": 0,
+    "repeat": 0,
+    "result": None,
+}
 
 
 def _runtime_source(mode: str = "rtl") -> dict:
@@ -169,15 +178,117 @@ def _ensure_rtl_design():
 
 
 def _current_dac_volume():
-    """读 CODEC_CORE 里 0x402B(DAC 数字音量) 的值，供校准表元数据比对。"""
+    """DAC digital volume is fixed by start_pl_i2s.sh (0x10 = -6 dB).
+
+    Do not import acceptance/pynq here: this runs in a background thread, and
+    PYNQ 3.1 needs an asyncio loop in the main thread.  Loading pynq from a
+    worker thread produces "There is no current event loop" and can leave the
+    device cache unusable.
+    """
+    return 0x10
+
+
+def _short_cal_status():
+    with _SHORT_CAL_LOCK:
+        return dict(_SHORT_CAL_STATE)
+
+
+def _short_cal_running():
+    with _SHORT_CAL_LOCK:
+        return bool(_SHORT_CAL_STATE.get("running"))
+
+
+def _short_cal_set(**kwargs):
+    with _SHORT_CAL_LOCK:
+        _SHORT_CAL_STATE.update(kwargs)
+
+
+def _run_short_calibration_bg(repeat: int):
+    """Measure the short and hand raw sweeps to calibrate_path.py.
+
+    This deliberately does not call _record_history(): short calibration data
+    must never enter data/history.csv.
+    """
+    import calibration as cal
+    import ps_ctrl
+    import calibrate_path
+
     try:
-        import acceptance
-        for reg, val in getattr(acceptance, "CODEC_CORE", ()):
-            if reg == 0x402B:
-                return val
-    except Exception:  # noqa: BLE001 非板端环境取不到也无所谓
-        pass
-    return None
+        _ensure_rtl_design()
+        cal.ensure_calibration_loaded()
+        cal.note_driver(dac_volume=_current_dac_volume())
+
+        cur_vol = _current_dac_volume()
+        old_vol = (cal.CAL_META or {}).get("dac_volume") or 0x10
+        try:
+            level_scale = float(cur_vol) / float(old_vol) if cur_vol else 1.0
+        except Exception:
+            level_scale = 1.0
+
+        expected = {}
+        for row in cal.CAL_TABLE:
+            entry = row.get(cal.CAL_PATH_DIRECT) or {}
+            gain = entry.get("mag_gain")
+            if gain and gain > 0:
+                expected[round(float(row["freq"]), 6)] = float(gain)
+
+        start_hz = max(20.0, ps_ctrl.SAFE_MIN_FREQ_HZ)
+        freqs = _log_spaced_freqs(start_hz, 20000.0, SWEEP_POINTS)
+        periods, _pinfo = ps_ctrl.build_period_schedule(
+            freqs, n_target=1000, budget_s=0.0)
+
+        total = len(freqs) * repeat
+        _short_cal_set(running=True, done=False, error=None,
+                       message="正在进行短接校准（0/%d）..." % total,
+                       progress=0, total=total, repeat=repeat, result=None)
+
+        sweeps = []
+        for round_index in range(repeat):
+            sweep = []
+            for idx, freq in enumerate(freqs):
+                acc_i, acc_q, window_n = ps_ctrl.measure_once(
+                    freq, periods=periods[idx])
+                mag, phase = cal.calc_mag_phase(acc_i, acc_q, window_n)
+                if mag <= 1e-15:
+                    raise RuntimeError(
+                        "短接校准在 %.1f Hz 幅值为 0；短接是否真的接好？" % freq)
+
+                # 短接判据保持不变：只用前 5 点，按 DAC 音量归一化后
+                # 与旧短接表的 mag_gain 比较，要求 0.98~1.02。
+                if idx < 5 and expected.get(round(freq, 6)):
+                    ratio = (mag * expected[round(freq, 6)]) / level_scale
+                    if ratio < 0.98 or ratio > 1.02:
+                        raise RuntimeError(
+                            "检测到不是短接：%.1f Hz 短接幅度比 %.3f"
+                            "（应为 1.000），一键短接校准已停止" % (freq, ratio)
+                        )
+
+                sweep.append((float(freq), float(mag), float(phase)))
+                done = round_index * len(freqs) + idx + 1
+                if done % 10 == 0 or done == total:
+                    _short_cal_set(
+                        progress=done,
+                        message="正在进行短接校准（%d/%d）..." % (done, total))
+
+            sweeps.append(sweep)
+
+        result = calibrate_path.build_calibration_table(
+            sweeps,
+            state=cal.CAL_PATH_DIRECT,
+            ref_amp=1.0,
+            dac_volume=cur_vol,
+            note="short connected; dashboard one-click calibration",
+            source="dashboard one-click short calibration",
+        )
+        _short_cal_set(
+            running=False, done=True, error=None,
+            message="短接校准完成：%d 点，%d 轮，已更新校准表"
+                    % (result["points"], result["repeat"]),
+            progress=total, result=result)
+    except Exception as exc:
+        _short_cal_set(running=False, done=False, error=str(exc),
+                       message="短接校准失败: %s" % exc)
+        app.logger.exception("一键短接校准失败")
 
 
 def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
@@ -319,38 +430,43 @@ def status():
         calibration = _calibration_state(cal, req_cal_path)
     except Exception as exc:
         calibration = {"calibrated": False, "message": str(exc)}
-    reference = {"running": False, "done": False, "error": None, "message": ""}
-    if startup_reference is not None:
-        try:
-            reference = startup_reference.status()
-        except Exception:
-            pass
     return jsonify(
         {
             "status": "success",
             "source": source,
             "calibration": calibration,
             "points": (AUDIO_SWEEP_POINTS if source["mode"] == "pynq_audio_loopback" else SWEEP_POINTS),
-            "reference": reference,
+            "short_calibration": _short_cal_status(),
         }
     )
 
 
-def _run_reference_bg():
+@app.route("/api/start_short_calibration", methods=["POST"])
+def api_start_short_calibration():
+    payload = request.get_json(silent=True) or {}
     try:
-        startup_reference.run(repeat=1, design_loaded=True)
-    except Exception:
-        app.logger.exception("参考扫频失败")
-
-
-@app.route("/api/start_reference", methods=["POST"])
-def api_start_reference():
-    if startup_reference is None:
-        return jsonify({"status": "error", "msg": "参考扫频模块不可用"}), 500
-    if startup_reference.is_running():
-        return jsonify({"status": "busy", "msg": "参考扫频正在进行，请稍候"}), 409
-    threading.Thread(target=_run_reference_bg, daemon=True).start()
-    return jsonify({"status": "started"})
+        repeat = int(payload.get("repeat", 1))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "msg": "扫频轮次必须是整数"}), 400
+    if repeat < 1 or repeat > SHORT_CAL_MAX_ROUNDS:
+        return jsonify({
+            "status": "error",
+            "msg": "扫频轮次必须在 1~%d 之间" % SHORT_CAL_MAX_ROUNDS,
+        }), 400
+    if _short_cal_running():
+        return jsonify({"status": "busy",
+                        "msg": "短接校准正在进行，请稍候"}), 409
+    try:
+        _ensure_rtl_design()
+    except Exception as exc:
+        return jsonify({"status": "error", "msg": str(exc)}), 503
+    _short_cal_set(running=True, done=False, error=None,
+                   message="准备短接校准...", progress=0,
+                   total=SWEEP_POINTS * repeat, repeat=repeat, result=None)
+    threading.Thread(target=_run_short_calibration_bg,
+                     args=(repeat,), daemon=True).start()
+    return jsonify({"status": "started", "repeat": repeat,
+                    "total": SWEEP_POINTS * repeat})
 
 
 @app.route("/api/iq", methods=["GET"])
@@ -388,9 +504,9 @@ def _record_history(data, source):
 
 @app.route("/api/start_sweep", methods=["POST"])
 def start_sweep():
-    if startup_reference is not None and startup_reference.is_running():
+    if _short_cal_running():
         return jsonify({"status": "busy",
-                        "msg": "正在进行相位对齐，请等待参考扫频完成后再试"}), 409
+                        "msg": "正在进行一键短接校准，请完成后再测量"}), 409
     payload = request.get_json(silent=True) or {}
     
     # 【修复 1】严格白名单校验
