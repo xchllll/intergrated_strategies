@@ -9,6 +9,9 @@ module dds #(
     input  wire                     rst_n,
     input  wire                     en,
     input  wire [PHASE_W-1:0]       phase_inc,
+    // 复位装载值。top 用 -2046*phase_inc 预装，使第一个被 demod 消费的
+    // 样本正好落在相位 0（抵消 DDS 输出寄存器和 start_here→data_valid 的延迟）。
+    input  wire [PHASE_W-1:0]       phase_init,
     output reg  signed [DATA_W-1:0] sine,   // 原有：正弦
     output reg  signed [DATA_W-1:0] cosine  // 新增：余弦
 );
@@ -31,12 +34,12 @@ module dds #(
     // 注意：如果地址超过了 1023，它会自动溢出回绕，这正是我们想要的（转了一圈又回来了）
     assign addr_cos = addr_sin + 10'd256; 
 
-    // 同步复位：rst_n 有效时，在时钟沿把相位累加器和两路输出清零。
+    // 同步复位：rst_n 有效时，在时钟沿装载 phase_init，并把两路输出清零。
     // 不能用异步复位，因为 top 的测量启动复位是由状态机译码产生的，
     // 同步复位可以避免组合逻辑毛刺导致相位偶发清零。
     always @(posedge clk) begin
         if (!rst_n) begin
-            phase_acc <= {PHASE_W{1'b0}};
+            phase_acc <= phase_init;
             sine      <= {DATA_W{1'b0}};
             cosine    <= {DATA_W{1'b0}};
         end else if (en) begin

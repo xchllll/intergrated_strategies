@@ -29,6 +29,12 @@ module top (
     wire        wire_sweep_clear; 
     wire        wire_sweep_en;    
     wire        dds_rst_n;          // DDS 相位基准复位（每次测量开始前归零）
+    // DDS 复位装载值：-2046*phase_inc。
+    // 从 start_here 锁存到真正的第一个 data_valid 是 2048 个时钟；DDS 输出
+    // 寄存器又比 phase_acc 晚一拍，所以第一个被 demod 消费的样本对应
+    // phase_init + 2046*phase_inc，装载 -2046*phase_inc 后正好为 0。
+    wire [31:0] dds_phase_init =
+        32'd0 - ((ps_phase_inc << 11) - (ps_phase_inc << 1));
     wire signed [15:0] wire_dds_sine;    
     wire signed [15:0] wire_dds_cosine;
     wire signed [47:0] acc_I_full;
@@ -54,6 +60,7 @@ module top (
     dds u_dds (
         .clk(clk), .rst_n(dds_rst_n), .en(1'b1), // 用测量窗口复位，保证相位从 0 开始
         .phase_inc(ps_phase_inc), 
+        .phase_init(dds_phase_init),
         .sine(wire_dds_sine), .cosine(wire_dds_cosine)   
     );
 
