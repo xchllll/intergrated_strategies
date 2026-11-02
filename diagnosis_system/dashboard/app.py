@@ -7,6 +7,7 @@ import platform
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 # 【永久修复 2】必须在 import pynq 之前让 XILINX_XRT 生效；
@@ -35,6 +36,10 @@ AUDIO_LOOPBACK_DRIVER = None
 
 # 【修复 3】全局标志位：保证自定义 bitstream 只在第一次扫频时烧录
 _RTL_DESIGN_LOADED = False
+
+# 本次 dashboard 进程的唯一标识。参考扫频写入校准表 meta；扫频前校验，
+# 防止重启后误用上一次进程留下的短接表（20 kHz 一采样/约 147° 的典型来源）。
+SESSION_ID = uuid.uuid4().hex
 
 
 def _runtime_source(mode: str = "rtl") -> dict:
@@ -151,6 +156,13 @@ def _run_rtl_hardware_sweep(use_buffer: bool) -> tuple[dict, dict, list[str]]:
     import ps_ctrl
 
     cal.ensure_calibration_loaded()
+    table_session = str((cal.CAL_META or {}).get("session_id") or "")
+    if table_session != SESSION_ID:
+        raise RuntimeError(
+            "当前校准表不是本 dashboard 进程生成的（session %s ≠ %s）。"
+            "请先接短接并等待/点击“参考扫频”，再用当前进程的短接表测量。"
+            % (table_session or "<missing>", SESSION_ID)
+        )
     cal.note_driver(dac_volume=_current_dac_volume())
     cal_path_str = "buffer" if use_buffer else "direct"
     cal_status = _calibration_state(cal, cal_path_str) # 使用修复后的状态函数
@@ -298,13 +310,16 @@ def status():
             "calibration": calibration,
             "points": (AUDIO_SWEEP_POINTS if source["mode"] == "pynq_audio_loopback" else SWEEP_POINTS),
             "reference": reference,
+            "session_id": SESSION_ID,
         }
     )
 
 
 def _run_reference_bg():
     try:
-        startup_reference.run(repeat=1, design_loaded=True)
+        startup_reference.run(
+            repeat=1, design_loaded=True, session_id=SESSION_ID
+        )
     except Exception:
         app.logger.exception("参考扫频失败")
 
@@ -372,6 +387,20 @@ def start_sweep():
         cal_path = "buffer"
 
     source = _runtime_source(mode)
+
+    # 自研 RTL 测量必须使用当前进程的短接表；否则 20 kHz 会留下整采样/
+    # 跨 session 的相位残差（典型 −130°）。参考扫频由 run_dashboard 启动时
+    # 自动触发，失败/未完成时拒绝扫频，避免把旧表结果写进 history。
+    if source["mode"] == "pynq_rtl" and startup_reference is not None:
+        ref = startup_reference.status()
+        if not ref.get("done"):
+            detail = ref.get("message") or "参考扫频尚未完成"
+            if ref.get("error"):
+                detail += "：" + str(ref["error"])
+            return jsonify({
+                "status": "busy",
+                "msg": detail + "。请接短接点“参考扫频”，完成后重新测量。",
+            }), 409
 
     try:
         if source["mode"] == "demo_csv":

@@ -1,6 +1,6 @@
 #!/bin/bash
 # 启动便携式电子电路智能诊断系统网页（PYNQ 3.1 需要 root + XILINX_XRT）
-# 参考扫频不再随启动自动执行：dashboard 起来后，在网页右下角点“参考扫频”。
+# 参考扫频随 run_dashboard 启动自动执行；若失败，可在网页右下角点“参考扫频”重试。
 set -u
 cd /home/xilinx/jupyter_notebooks/project || exit 1
 
