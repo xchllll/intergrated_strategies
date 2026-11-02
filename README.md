@@ -84,7 +84,7 @@ H_disp(f) = R_ref / (Z_dut(f) + R_ref)
 
 这样纯电阻 DUT 显示为 0 dB / 0°，RC/RL/RLC 显示的是它们相对 `R_ref` 的真实衰减与相移。详细推导、标准件清单和局限性见 [`skill/DE_EMBED_METHOD.md`](skill/DE_EMBED_METHOD.md)。
 
-> 注：`skill/DE_EMBED_METHOD.md` 的标准件表是早期 13 行版本；当前 `data/input_network.json` 与 `report/hplane_14rows_errors.md` 为 14 行（增加 `rlrc1k98`：1.98 kΩ + 98.7 mH + 98.11 nF）。
+> 注：`skill/DE_EMBED_METHOD.md` 的标准件表是早期 13 行版本；当前 `data/input_network.json` 是 **2026-11-02 重建的 14 行表**：12 组旧标准件 + 新 `rl41m_3k87`（3.87 kΩ + 41 mH）+ 新 `rlrc1k98`（1.98 kΩ + 98.7 mH + 98.11 nF）。重建与校验见 [`report/hplane_rebuild_20261102.md`](report/hplane_rebuild_20261102.md)。
 
 ---
 
@@ -171,7 +171,8 @@ PL（100 MHz）
 | 1 kHz 单点 | `periods=10`、`N=488`、理论积分 9.994 ms、实测约 12.1 ms |
 | 短接重复性 | 20 kHz 0.00 dB / 0.00°；全频段相位约 −0.02…+0.07° |
 | 9.8 mH + 11.6 kΩ @ 20 kHz | −6.28 dB / −3.14°，理论模型 −6.28 dB / −3.12° |
-| 14 行 H 平面误差 | 幅度 rms 0.07–0.55 dB（max 1.91 dB）；相位 rms 0.69–4.14°（max 10.04°） |
+| 旧 14 行 H 平面误差（2026-10） | 幅度 rms 0.07–0.55 dB（max 1.91 dB）；相位 rms 0.69–4.14°（max 10.04°） |
+| 新 14 行 H 平面 in-sample（2026-11-02） | 幅度 rms 均值 0.011 dB（max 0.070 dB）；相位 rms 均值 0.033°（max 0.122°） |
 | 数据集 | 5 类 × 30 条 = 150 条真实扫频曲线，每条 240 点 |
 | 分类 | 按类别分层抽 20% 测试；决策树 100.00%，MLP 100.00% |
 | 资源占用 | 656 LUT（1%）、268 FF（<1%）、2 DSP（1%） |
@@ -186,7 +187,7 @@ PL（100 MHz）
 
 逐行数值见 [`report/hplane_14rows_errors.md`](report/hplane_14rows_errors.md)。这些误差依赖短接帧相位、线缆、标准件容差和温度，换环境后数值会变，但可以用同一套流程重新得到。
 
-> 当前 `data/input_network.json` 是 2026-10-28 前后的 14 行快照，建表短接为 `cal_board.json`（10/27 20:16），而当前 `data/calibration_table.json` 是 10/28 19:18 的短接；两者不是同一 session。用当前短接表 + 旧标准件 sweep 重建会得到不同的行值，并触发 5.8 的配对警告。
+> 当前 `data/input_network.json` 是 **2026-11-02 重建的新 14 行表**：使用当前 5 轮短接表，12 组旧标准件 + 新 `rl41m_3k87` + 新 `rlrc1k98`。旧 `hplane_14rows_errors` 图/报告保留为历史版本；新表的 in-sample 校验见 [`report/hplane_rebuild_20261102.md`](report/hplane_rebuild_20261102.md)。
 
 ### 3.3 资源与时序报告
 
@@ -598,7 +599,7 @@ Z_dut(f) = R + jwL + 1/(jwC)
 
 #### 2）准备标准件参数
 
-模板见 [`tools/hplane_standards.example.json`](tools/hplane_standards.example.json)，包含本次 14 行表的全部标准件、实测 R/L/C 和 sweep_id。字段：
+模板见 [`tools/hplane_standards.example.json`](tools/hplane_standards.example.json)（历史 14 行），当前新表使用 [`tools/hplane_standards.20261102.json`](tools/hplane_standards.20261102.json)。字段：
 
 | 字段 | 说明 |
 |---|---|
@@ -623,18 +624,18 @@ cd /home/xilinx/jupyter_notebooks/project
 cd /home/xilinx/jupyter_notebooks/project
 /usr/local/share/pynq-venv/bin/python3 tools/build_hplane.py \
   --history data/history.csv \
-  --standards-json tools/hplane_standards.example.json \
+  --standards-json tools/hplane_standards.20261102.json \
   --base-table data/input_network.json \
   --output /tmp/input_network.built.json
 ```
 
-> 本次已在板端实跑：`exit 0`，输出 14 行 × 240 点，`R_ref≈10980.99`；当前 `calibration_table.json` 与模板旧 sweep 的配对警告如 5.8.5 所述。换回 `cal_board.json`（10/27 短接）后，校验大部分行 <0.1 dB / <1°，仅 `rl9m8_1k032` 约 0.59 dB / 2.4°。
+> 2026-11-02 已用当前 5 轮短接表 + 12 组旧标准件 + 新 `rl41m_3k87` + 新 `rlrc1k98` 重建；新表 in-sample 均值 0.011 dB / 0.033°，校验见 `report/hplane_rebuild_20261102.md`。
 
 ```bash
 # PC（仓库根目录，numpy 即可）
 python3 tools/build_hplane.py \
   --history data/history.csv \
-  --standards-json tools/hplane_standards.example.json \
+  --standards-json tools/hplane_standards.20261102.json \
   --base-table data/input_network.json \
   --output data/input_network.built.json
 ```
@@ -768,6 +769,7 @@ bash board/cal_toggle.sh all      # 直连/缓冲都启用
 | [`report/performance_metrics.md`](report/performance_metrics.md) | 扫频、重复性、校准、分类与验收指标汇总 |
 | [`report/hplane_14rows_errors.md`](report/hplane_14rows_errors.md) | 14 行 H 平面逐行误差 |
 | [`report/hplane_current_short_20261102.md`](report/hplane_current_short_20261102.md) | 当前短接表套 14 组标准件的幅相误差分析 |
+| [`report/hplane_rebuild_20261102.md`](report/hplane_rebuild_20261102.md) | 新 RL/RLC 加入后的 H 平面表重建与校验 |
 | [`report/ml_training_note.md`](report/ml_training_note.md) | 实测数据训练报告与混淆矩阵 |
 | [`tools/build_hplane.py`](tools/build_hplane.py) | H 平面建表 CLI（自动读 `data/calibration_table.json`） |
 | [`tools/hplane_standards.example.json`](tools/hplane_standards.example.json) | 14 只标准件的实测参数/sweep_id 模板 |

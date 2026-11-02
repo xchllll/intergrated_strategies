@@ -1,0 +1,103 @@
+{
+  "note": "2026-11-02 rebuild: 12 old standards + new RL rl41m_3k87 + new RLC rlrc1k98 sweep",
+  "standards": [
+    {
+      "label": "97k2",
+      "topology": "resistor",
+      "R": "97.2k",
+      "sweep": "20261027-214036-429028"
+    },
+    {
+      "label": "51k4",
+      "topology": "resistor",
+      "R": "51.4k",
+      "sweep": "20261027-213705-015364"
+    },
+    {
+      "label": "rc11k6",
+      "topology": "series_rc",
+      "R": "11.6k",
+      "C": "10.26n",
+      "sweep": "20261028-034254-893800"
+    },
+    {
+      "label": "rc1k473",
+      "topology": "series_rc",
+      "R": "1.473k",
+      "C": "10n",
+      "sweep": "20261028-010806-349144"
+    },
+    {
+      "label": "rc1k98",
+      "topology": "series_rc",
+      "R": "1.98k",
+      "C": "10n",
+      "sweep": "20261028-001034-612994"
+    },
+    {
+      "label": "rl9m8_11k6",
+      "topology": "series_rl",
+      "R": "11.612k",
+      "L": "9.8m",
+      "sweep": "20261028-040505-926954",
+      "note": "R 为电阻 + 电感 DCR 的总串联电阻"
+    },
+    {
+      "label": "9k2",
+      "topology": "resistor",
+      "R": "9.2k",
+      "sweep": "20261028-003607-171364"
+    },
+    {
+      "label": "rl101m7_2k03",
+      "topology": "series_rl",
+      "R": "2.205k",
+      "L": "101.7m",
+      "sweep": "20261028-035311-745854",
+      "note": "R 为电阻 + 电感 DCR 的总串联电阻"
+    },
+    {
+      "label": "2k04",
+      "topology": "resistor",
+      "R": "2.04k",
+      "sweep": "20261027-213213-575351"
+    },
+    {
+      "label": "rl9m8_2k03",
+      "topology": "series_rl",
+      "R": "2.061k",
+      "L": "9.8m",
+      "sweep": "20261028-035230-202276",
+      "note": "R 为电阻 + 电感 DCR 的总串联电阻"
+    },
+    {
+      "label": "1k473",
+      "topology": "resistor",
+      "R": "1.473k",
+      "sweep": "20261028-005909-530679"
+    },
+    {
+      "label": "1k02",
+      "topology": "resistor",
+      "R": "1.02k",
+      "sweep": "20261027-213110-740537"
+    },
+    {
+      "label": "rl41m_3k87",
+      "topology": "series_rl",
+      "R": "3.87k",
+      "L": "41m",
+      "sweep": "20261029-032047-925494",
+      "note": "replacement RL; R total measured 3.87k, L 41mH; input network includes fixture capacitance"
+    },
+    {
+      "label": "rlrc1k98",
+      "topology": "series_rlc",
+      "R": "1.98k",
+      "L": "98.7m",
+      "C": "98.11n",
+      "sweep": "20261029-033305-332303",
+      "note": "new RLC sweep under current persistent short session"
+    }
+  ]
+}
