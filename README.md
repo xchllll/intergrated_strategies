@@ -260,6 +260,7 @@ intergrated_strategies/
 │  ├─ short_*.md/png/csv/json   # 短接重复性/对齐
 │  └─ confusion_matrix.png      # 混淆矩阵
 ├─ docs/                       # 环境、寄存器映射、最低验收
+├─ prompts/                    # 大模型协作记录
 ├─ skill/                      # 开发过程中沉淀的可复用经验与去嵌入方法
 ├─ run_dashboard.py            # 只启动 Flask，附着常驻 PL/I2S
 └─ start_dashboard.sh          # dashboard 后台启动脚本
