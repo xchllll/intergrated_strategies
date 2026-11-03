@@ -335,22 +335,44 @@ function setNotice(message, isWarning) {
 }
 
 // B 核心逻辑：根据模式动态绘图
+const TRUST_FMAX_HZ = 3000;
+
+// 3 kHz 以上夹具寄生主导：这一段画成灰色虚线，其余保持实线
+function __splitByBand(xs, ys) {
+    const out = { xa: [], ya: [], xb: [], yb: [] };
+    if (!xs || !xs.length) return out;
+    const fmax = Math.max.apply(null, xs);
+    if (!(fmax > TRUST_FMAX_HZ)) { out.xa = xs; out.ya = ys; return out; }
+    let idx = 0;
+    while (idx < xs.length && xs[idx] <= TRUST_FMAX_HZ) idx++;
+    for (let i = 0; i <= idx && i < xs.length; i++) { out.xa.push(xs[i]); out.ya.push(ys[i]); }
+    for (let i = idx; i < xs.length; i++) { out.xb.push(xs[i]); out.yb.push(ys[i]); }
+    return out;
+}
+
 function drawBode(freqs, magnitude, phase, mode) {
     // 1. 动态判断坐标轴标题
     const isAudio = (mode === 'pynq_audio_loopback');
     const magYAxisTitle = isAudio ? '电平 (dBFS)' : '增益 (dB)';
 
+    const __mSplit = __splitByBand(freqs, magnitude);
     const magnitudeTrace = {
-        x: freqs, y: magnitude, type: 'scatter', mode: 'lines+markers',
+        x: __mSplit.xa, y: __mSplit.ya, type: 'scatter', mode: 'lines+markers',
         name: '幅频', line: { color: '#1769e0', width: 2 }, marker: { size: 3 }
+    };
+    const magnitudeTraceTail = {
+        x: __mSplit.xb, y: __mSplit.yb, type: 'scatter', mode: 'lines',
+        name: '> 3 kHz 寄生影响增大',
+        line: { color: '#9aa7b5', width: 2, dash: 'dash' }
     };
     const magnitudeLayout = {
         xaxis: { type: 'log', title: '频率 (Hz)', gridcolor: '#e8edf3' },
         yaxis: { title: magYAxisTitle, gridcolor: '#e8edf3' }, // 使用动态标题
-        margin: { t: 12, b: 48, l: 58, r: 20 }, height: 310,
+        margin: { t: 34, b: 48, l: 58, r: 20 }, height: 310,
+        legend: { orientation: 'h', x: 0, y: 1.16, font: { size: 11 } },
         plot_bgcolor: 'transparent', paper_bgcolor: 'transparent'
     };
-    Plotly.react('magnitude-plot', [magnitudeTrace], magnitudeLayout, { responsive: true, displaylogo: false });
+    Plotly.react('magnitude-plot', [magnitudeTrace, magnitudeTraceTail], magnitudeLayout, { responsive: true, displaylogo: false });
 
     // 2. 相频图的置灰处理
     const phaseContainer = document.getElementById('phase-container');
@@ -380,16 +402,23 @@ function drawBode(freqs, magnitude, phase, mode) {
         phaseContainer.style.opacity = '1';
         phaseTitle.textContent = '相频特性';
         
+        const __pSplit = __splitByBand(freqs, phase);
         const phaseTrace = {
-            x: freqs, y: phase, type: 'scatter', mode: 'lines+markers',
+            x: __pSplit.xa, y: __pSplit.ya, type: 'scatter', mode: 'lines+markers',
             name: '相频', line: { color: '#d95c14', width: 2 }, marker: { size: 3 }
+        };
+        const phaseTraceTail = {
+            x: __pSplit.xb, y: __pSplit.yb, type: 'scatter', mode: 'lines',
+            name: '> 3 kHz \u5bc4\u751f\u5f71\u54cd\u589e\u5927',
+            line: { color: '#c0a894', width: 2, dash: 'dash' }
         };
         const phaseLayout = {
             xaxis: { type: 'log', title: '频率 (Hz)', gridcolor: '#e8edf3' },
             yaxis: { title: '相位 (度)', gridcolor: '#e8edf3' },
-            margin: { t: 12, b: 48, l: 58, r: 20 }, height: 310,
+            margin: { t: 34, b: 48, l: 58, r: 20 }, height: 310,
+            legend: { orientation: 'h', x: 0, y: 1.16, font: { size: 11 } },
             plot_bgcolor: 'transparent', paper_bgcolor: 'transparent'
         };
-        Plotly.react('phase-plot', [phaseTrace], phaseLayout, { responsive: true, displaylogo: false });
+        Plotly.react('phase-plot', [phaseTrace, phaseTraceTail], phaseLayout, { responsive: true, displaylogo: false });
     }
 }
