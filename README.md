@@ -448,13 +448,13 @@ cd /home/xilinx/jupyter_notebooks/project
 > 第二行也可替换为以下指令：
 
 ```bash
-python3 dashboard.py
+python3 run_dashboard.py
 ```
 
 > 或：
 
 ```bash
-python3 dashboard.py
+bash start_dashboard.py
 ```
 
 `run_dashboard.py` 只启动 Flask，**不再加载 PL、不配置 Codec、不碰 I2S**；它只检查 `/tmp/pl_i2s_ready.json`。日志：
