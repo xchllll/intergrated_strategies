@@ -92,7 +92,7 @@ H_disp(f) = R_ref / (Z_dut(f) + R_ref)
 >
 > 需要重新启用时，把 `data/cal_mode.json` 改成 `{"direct": true, "buffer": false, "hplane": true}` 并重启 dashboard 即可。
 
-### 1.5 可辨识性说明（重要）
+### 1.5 可辨识性说明
 
 本系统识别的是**频率选择特性**（低通 / 高通 / 带通）与**观测拐点**，不是 DUT 内部元件的物理类型。定量的依据：
 
@@ -442,10 +442,20 @@ sudo bash board/start_pl_i2s.sh
 
 ```bash
 cd /home/xilinx/jupyter_notebooks/project
-./start_dashboard.sh --no-ref
+./start_dashboard.sh
 ```
 
-> **`--no-ref` 不要省。** 带 `--no-ref` 时 dashboard 只附着已有 PL，**保留现有校准表**；不加这个参数会在启动时跑一次"短接参考标定"，若当时接着 DUT，会试图把 DUT 当成短接基准（有判据拦截，但会中断启动流程）。
+> 第二行也可替换为以下指令：
+
+```bash
+python3 dashboard.py
+```
+
+> 或：
+
+```bash
+python3 dashboard.py
+```
 
 `run_dashboard.py` 只启动 Flask，**不再加载 PL、不配置 Codec、不碰 I2S**；它只检查 `/tmp/pl_i2s_ready.json`。日志：
 
