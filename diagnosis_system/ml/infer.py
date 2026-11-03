@@ -12,6 +12,19 @@ from ml.gen_mock import CLASSES
 # 全局变量
 _model = None
 
+# 五类细标签 -> 三类频率选择特性
+# RC 低通与 RL 低通在相同 fc 下不可区分（实测仅差约 1.3 dB），
+# 因此对外只输出"低通/高通/带通"这一层可可靠判定的结论。
+SHAPE_OF = {
+    "rc_lowpass": "低通",
+    "rl_lowpass": "低通",
+    "rc_highpass": "高通",
+    "rl_highpass": "高通",
+    "rlc_bandpass": "带通",
+}
+SHAPE_ORDER = ["低通", "高通", "带通"]
+
+
 def get_model():
     """优先加载与 sklearn 版本无关的 JSON；没有 JSON 时回退到 joblib。"""
     global _model
@@ -28,6 +41,30 @@ def get_model():
                     "找不到模型文件: %s 或 %s，请先运行 train.py" % (json_path, joblib_path))
             _model = joblib.load(joblib_path)
     return _model
+
+
+def _fmt_hz(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "--"
+    if v <= 0:
+        return "--"
+    if v >= 1000:
+        return "%.1f kHz" % (v / 1000.0)
+    return "%.0f Hz" % v
+
+
+def _shape_probs(model, proba):
+    """把五类概率按 低通/高通/带通 分组求和（划分是完备的，概率可加）。"""
+    agg = {k: 0.0 for k in SHAPE_ORDER}
+    for cls, p in zip(model.classes_, proba):
+        key = SHAPE_OF.get(cls)
+        if key is None:
+            continue
+        agg[key] += float(p)
+    return agg
+
 
 def predict_topology(sweep_dict, data_source="demo"):
     """
@@ -59,28 +96,31 @@ def predict_topology(sweep_dict, data_source="demo"):
     # 正常推理
     # ==========================================
     model = get_model()
-    
+
     # 提取特征
     feats = extract_features(freqs, mags, phases)
-    X_input = to_vector(feats).reshape(1, -1) 
-    
-    # 预测
+    X_input = to_vector(feats).reshape(1, -1)
+
+    # 预测（五类 -> 三类形状）
     pred_proba = model.predict_proba(X_input)[0]
-    
-    max_idx = np.argmax(pred_proba)
-    confidence = float(pred_proba[max_idx])
-    
-    label_en = model.classes_[max_idx]
-    label_cn = CLASSES.get(label_en, label_en)
-    
-    top3_indices = np.argsort(pred_proba)[::-1][:3]
-    top3 = []
-    for idx in top3_indices:
-        top3.append({
-            "label": CLASSES.get(model.classes_[idx], model.classes_[idx]),
-            "confidence": float(pred_proba[idx])
-        })
-        
+    agg = _shape_probs(model, pred_proba)
+
+    shape = max(SHAPE_ORDER, key=lambda k: agg[k])
+    confidence = float(agg[shape])
+
+    # 观测拐点：低通/高通用 f3db；带通用峰值频率
+    if shape == "带通":
+        fc = feats.get("peak_freq_hz", 0.0)
+        fc_name = "中心频率"
+    else:
+        fc = feats.get("f3db_hz", 0.0)
+        fc_name = "观测拐点"
+
+    label = "%s（%s %s）" % (shape, fc_name, _fmt_hz(fc))
+
+    top3 = [{"label": k, "confidence": float(agg[k])}
+            for k in sorted(SHAPE_ORDER, key=lambda k: -agg[k])]
+
     # 统一处理 model_note (兼容 app.py 传过来的多种 mode 字符串)
     if data_source in ["rtl", "pynq_rtl"]:
         note = "基于自研 PL 解调实测数据"
@@ -90,11 +130,15 @@ def predict_topology(sweep_dict, data_source="demo"):
         note = "演示 CSV + 预训练演示模型，不代表硬件实测"
 
     return {
-        "label": label_cn,
+        "label": label,
+        "shape": shape,
         "confidence": confidence,
+        "fc_hz": float(fc) if fc else 0.0,
+        "fc_name": fc_name,
         "top3": top3,
-        "model_note": note
+        "model_note": note,
     }
+
 
 def _invalid_response(reason, data_source):
     """封装返回无效数据的结构，避免前端报错"""
@@ -104,10 +148,13 @@ def _invalid_response(reason, data_source):
         note = "基于官方音频闭环数据"
     else:
         note = "演示 CSV 数据"
-        
+
     return {
         "label": "数据无效",
+        "shape": "无效",
         "confidence": 0.0,
+        "fc_hz": 0.0,
+        "fc_name": "",
         "top3": [],
-        "model_note": f"【拦截】{reason}。{note}。"
+        "model_note": f"【拦截】{reason}。{note}。",
     }
