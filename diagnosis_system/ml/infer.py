@@ -92,6 +92,13 @@ def predict_topology(sweep_dict, data_source="demo"):
     if dynamic_range < 1.0:
         return _invalid_response(f"信号动态范围过小 ({dynamic_range:.2f} dB)，可能未接入电路或已削顶", data_source)
 
+    # 4. 检查信号强度：整条曲线最强点若远低于 -30 dB，说明几乎没有信号
+    peak_db = float(np.max(mags_arr))
+    if peak_db < -30.0:
+        return _invalid_response(
+            f"信号过弱（最强点仅 {peak_db:.1f} dB），请检查接线或重新标定",
+            data_source)
+
     # ==========================================
     # 正常推理
     # ==========================================
