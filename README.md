@@ -4,9 +4,9 @@
 
 [GitHub 仓库](https://github.com/xchllll/intergrated_strategies) · PYNQ-Z2 / Zynq-7020 · Vivado 2025.2 · Python / Flask / Plotly
 
-> 项目状态：测量链路、短接校准、输入网络去嵌入、机器学习拓扑识别与网页展示已经打通；仓库内保留了某次可用环境下的实测数据、校准表和验收记录，便于复现与对照。
+> 项目状态：测量链路、短接校准、机器学习形状识别与网页展示已经打通；输入网络去嵌入默认关闭（见 1.4）。仓库内保留了某次可用环境下的实测数据、校准表和验收记录，便于复现与对照。
 
-> **最短复现路径**：板端部署 → `sudo bash board/start_pl_i2s.sh`（上电后一次性加载 PL/Codec 并常驻 I2S）→ `bash start_dashboard.sh` → 接 0 Ω 短接，点“一键短接校准”并输入轮次 → 换 DUT，选择“二端口 series / 三端口 shunt”，点“开始扫频测量”。之后 dashboard 可以随意重启，不需要再加载 PL 或重新校准。完整步骤见第五节；没有板子可先看 5.2 的 PC 演示。
+> **最短复现路径**：板端部署 → `sudo bash board/start_pl_i2s.sh`（上电后一次性加载 PL/Codec 并常驻 I2S）→ `./start_dashboard.sh --no-ref` → 接 0 Ω 短接，点右下角"一键短接校准"，等按钮变绿 → 换 DUT，点"开始扫频测量"，读 **低通/高通/带通 + 观测拐点**。之后 dashboard 可以随意重启，不需要再加载 PL 或重新校准。完整步骤见第五节；没有板子可先看 5.2 的 PC 演示。
 
 ---
 
@@ -84,6 +84,30 @@ H_disp(f) = R_ref / (Z_dut(f) + R_ref)
 
 这样纯电阻 DUT 显示为 0 dB / 0°，RC/RL/RLC 显示的是它们相对 `R_ref` 的真实衰减与相移。详细推导、标准件清单和局限性见 [`skill/DE_EMBED_METHOD.md`](skill/DE_EMBED_METHOD.md)。
 
+> **当前配置（2026-11-03）：`data/cal_mode.json` 中 `hplane = false`，即只做第一层短接校准，关闭第二、三层去嵌入。**
+>
+> 原因：H 平面表在深衰减区的外推不可靠。实测同一条 RC 低通曲线，20 kHz 处纯短接校准值是 −15.6 dB，经去嵌入后被抬到 −3.2 dB（**+12.4 dB**），把正常的 20 dB/十倍频程滚降拉成了近似平线，导致在线测量与训练分布不一致。
+>
+> 关闭去嵌入后：`rc_lowpass` 动态范围由 22.2 dB 恢复到 **34.0 dB**，`rl_highpass` 由 6.2 dB 恢复到 **16.7 dB**，曲线恢复物理正确的形状。代价是绝对幅度不再是"相对 `R_ref` 的归一化值"，而是夹具的分压比；对分类无影响（训练与推理用同一变换），但绝对 dB 不能直接当作器件参数。
+>
+> 需要重新启用时，把 `data/cal_mode.json` 改成 `{"direct": true, "buffer": false, "hplane": true}` 并重启 dashboard 即可。
+
+### 1.5 可辨识性说明（重要）
+
+本系统识别的是**频率选择特性**（低通 / 高通 / 带通）与**观测拐点**，不是 DUT 内部元件的物理类型。定量的依据：
+
+| 对比 | 结论 |
+|---|---|
+| 低通 vs 高通 vs 带通 | 形状互为镜像或带峰，**可可靠区分** |
+| RC 低通 vs RL 低通（**相同 fc**） | 传递函数同为 $1/(1+jf/f_c)$，实测曲线最大差异仅 **1.3 dB**，且该差异随元件取值变化，**不构成可靠判据** |
+| RC 高通 vs RL 高通（相同 fc） | 同上 |
+
+因此：
+
+1. 训练集里 RC 类与 RL 类的 fc 区间刻意分开（RC 159–339 Hz，RL 1.6–7.5 kHz），模型实际学到的是"形状 + fc 区间"；
+2. **在线推理不再输出 RC/RL 细类**，只输出形状 + 观测拐点（见 3.1）；
+3. 夹具输入阻抗（约 10.9 kΩ）并联在输出端，使**观测拐点高于元件本身的截止频率 26%–92%**（10k+100nF：159 Hz → 291 Hz；100mH+1k：1592 Hz → 3049 Hz）。所以系统给出的是"观测拐点"，不是元件 fc。
+
 > 注：`skill/DE_EMBED_METHOD.md` 的标准件表是早期 13 行版本；当前 `data/input_network.json` 是 **2026-11-02 的 22 行 topology-aware 表**：16 行 series 标准件 + 6 行 shunt 标准件（`rc_lp_1k98n1`、`rl_hp_1k100m`、`rc_lp_3k2_9n56`、`rc_lp_10k_1n`、`rl_hp_2k2_63m`、`rl_hp_4k7_43m`）。分组校验与运行时行为见 [`report/hplane_topology_aware_20261102.md`](report/hplane_topology_aware_20261102.md)。
 
 ---
@@ -140,8 +164,8 @@ PL（100 MHz）
 | 每点积分窗 | `N = periods · fs / f`，`periods = clamp(1000·f/fs, 10, 1000)`；20 Hz–20 kHz 实际约 10–410 个周期 |
 | 解调输出 | 48 位有符号 `acc_I` / `acc_Q`，AXI GPIO 分低 32 位 + 高 16 位读取 |
 | 校准表 | `data/calibration_table.json`，format 2，240 个 direct 频点 |
-| 输入网络表 | `data/input_network.json`，format 3，22 行（16 series + 6 shunt），`meta.table_kind=topology_aware`，`R_ref ≈ 10989 Ω` |
-| 识别类别 | 当前模型 5 类：RC 低通/高通、RL 低通/高通、RLC 带通 |
+| 输入网络表 | `data/input_network.json`，format 3，22 行（16 series + 6 shunt），`meta.table_kind=topology_aware`，`R_ref ≈ 10989 Ω`；**当前 `cal_mode.json` 中 `hplane=false`，该表不参与在线计算** |
+| 识别类别 | 对外输出 **3 类形状**（低通/高通/带通）+ 观测拐点；内部模型仍训练 5 类细标签，推理时按组求和 |
 | 网页 | Flask + 本地 Plotly，默认端口 5000 |
 
 > 说明：`src/top.v` 和 `board/acceptance.py` 中仍保留了一些“10 MHz / 50 MHz MCLK”的历史注释；当前 RTL 的 `mclk_div` 是 4 分频，即 **25 MHz**，配套 `CONVSR=6`（512×fs）。以当前代码与 XSA 为准。
@@ -173,13 +197,17 @@ PL（100 MHz）
 | 9.8 mH + 11.6 kΩ @ 20 kHz | −6.28 dB / −3.14°，理论模型 −6.28 dB / −3.12° |
 | 旧 14 行 H 平面误差（2026-10） | 幅度 rms 0.07–0.55 dB（max 1.91 dB）；相位 rms 0.69–4.14°（max 10.04°） |
 | 新 22 行 topology-aware H 平面 in-sample（2026-11-02） | 幅度 rms 均值 0.010 dB（max 0.070 dB）；相位 rms 均值 0.065°（max 0.246°） |
-| 数据集 | 5 类 × 30 条 = 150 条真实扫频曲线，每条 240 点 |
-| 分类 | 按类别分层抽 20% 测试；决策树 100.00%，MLP 100.00% |
+| 数据集 | 5 类 × 30 条 = 150 条真实扫频曲线，每条 240 点（`data/real/`，关闭去嵌入重算） |
+| 分类（内部细类） | 按类别分层抽 20% 测试：决策树 100.00%，MLP 100.00%；5 折交叉验证 150/150 |
+| 分类（对外输出） | **低通 / 高通 / 带通** 三类 + **观测拐点**；150 条实测回放 150/150，置信度均值 0.988、最低 0.967 |
+| 无效数据拦截 | 点数 <10、NaN/Inf、动态范围 <1 dB、**最强点 < −30 dB** 均返回"数据无效"，不硬给结论 |
 | 资源占用 | 656 LUT（1%）、268 FF（<1%）、2 DSP（1%） |
 | 时序 | WNS 2.277 ns、WHS 0.149 ns、WPWS 4.500 ns，约束全部满足 |
 | 上板验收 | `data/acceptance_latest.json`：backend=rtl，1 kHz，`done=true`，100 MHz，`passed=true` |
 
-> 分类准确率的限定：训练与测试都来自同一块板、同一套夹具下采集的 150 条真实曲线，只做了 80/20 分层划分，**没有做跨设备、跨夹具或域外测试**。100% 只说明这批数据在当前划分下完全可分，不代表任意环境的泛化能力。
+> **关于 100% 的限定**：训练与测试都来自同一块板、同一套夹具下采集的 150 条真实曲线，只做了 80/20 分层划分与 5 折交叉验证，**没有跨设备、跨夹具或域外测试**。100% 只说明这批数据在当前划分下完全可分。
+>
+> 更重要的边界见 **1.5 可辨识性说明**：相同 fc 下 RC 与 RL 的曲线实测只差 1.3 dB，所以系统对外只回答"低通/高通/带通 + 观测拐点"，不回答"是 RC 还是 RL"。
 
 ### 3.2 H 平面误差
 
@@ -413,8 +441,11 @@ sudo bash board/start_pl_i2s.sh
 #### 4）启动 Dashboard
 
 ```bash
-bash start_dashboard.sh
+cd /home/xilinx/jupyter_notebooks/project
+./start_dashboard.sh --no-ref
 ```
+
+> **`--no-ref` 不要省。** 带 `--no-ref` 时 dashboard 只附着已有 PL，**保留现有校准表**；不加这个参数会在启动时跑一次"短接参考标定"，若当时接着 DUT，会试图把 DUT 当成短接基准（有判据拦截，但会中断启动流程）。
 
 `run_dashboard.py` 只启动 Flask，**不再加载 PL、不配置 Codec、不碰 I2S**；它只检查 `/tmp/pl_i2s_ready.json`。日志：
 
@@ -470,13 +501,13 @@ ADAU1761 没有 RESET 引脚，只有 POR；一旦重新 `load_design`（例如�
 
 1. 保持 0 Ω 短接，打开网页；
 2. 点击右下角“一键短接校准”；
-3. 弹窗确认当前是短接状态，输入扫频轮次（1~10，默认 3）；
-4. 点击“确认校准”；
-5. 后端按 240 点 × 轮次扫频，短接判据仍是前 5 点幅度比 0.98~1.02；
-6. 所有轮次成功后，原始幅相交给 `calibrate_path.py` 做复数平均并原子替换 `data/calibration_table.json`；
+3. 按钮直接进入 `检测中...`（橙色），**不再有弹窗**；后端立刻用前 5 点幅度比判断是否短接；
+4. 判定通过后按钮变为 `校准中 0% → 100%`，全程约 60 秒（3 轮）；
+5. 每轮扫完还会做**全频段平坦度**校验（P90 偏差 > 1 dB 即判非短接），双重保险；
+6. 全部通过后原始幅相交给 `calibrate_path.py` 做复数平均并原子替换 `data/calibration_table.json`，按钮变绿并显示 `校准完毕 ✓`；
 7. 校准数据**不写入** `data/history.csv`。
 
-如果当前接的是 DUT，前 5 点判据会报“检测到不是短接”，校准表不会被修改。
+如果当前接的是 DUT，按钮会变红显示 **`电路未短接`**，1~2 秒内返回，校准表不会被修改。
 
 查看状态：
 
@@ -508,7 +539,19 @@ PY
 3. 点击“开始扫频测量”；
 4. 扫频过程中按钮显示当前进度 `x/240`；
 5. 等待约 20 秒；
-6. 查看幅频/相频曲线和右侧“AI 识别结果”。
+6. 查看幅频/相频曲线和右侧"AI 识别结果"。
+
+AI 区域的输出形如：
+
+```text
+拓扑判定：低通（观测拐点 312 Hz）
+置信度：99.8%
+top3：低通 99.8% | 高通 0.2% | 带通 0%
+```
+
+- **低通 / 高通 / 带通** 是可靠结论（见 1.5）；
+- **观测拐点** 是曲线上 −3 dB 点的实测位置，受夹具输入阻抗影响，**高于元件本身 fc 的 26%–92%**，不要当元件参数用；
+- 曲线无效时显示 `数据无效` 并给出原因（动态范围过小 / 信号过弱 / 点数不足）。
 
 后端流程：
 
@@ -517,12 +560,11 @@ _run_rtl_hardware_sweep(..., dut_type=selected)
   → 240 点对数扫频，每点按 build_period_schedule() 设频/设窗/启动/回读
   → calibration.calc_mag_phase(acc_I, acc_Q, N)
   → calibration.apply_calibration(..., path="direct", dut_type=selected)
-  → series: input_network.deembed_complex() 使用 series 子表
-  → shunt : input_network.deembed_shunt_equivalent() 使用 shunt 子表
-  → 返回 mag_db / phase_deg / AI 结果
+  → 当前 hplane=false：跳过 input_network 去嵌入，直接返回短接校准后的幅相
+  → infer.predict_topology()：五类概率按 低通/高通/带通 分组求和 → 形状 + 拐点
 ```
 
-> shunt 模式当前是明确的 **等效 series 显示**：它使用 shunt 子表的 H→Zin 插值，但三端口网络的严格 H_disp 仍需要 DUT 的 R/L/C 参数。网页会在 warnings 中显示这一点。
+> `hplane=true` 时才走 `input_network.deembed_complex()` / `deembed_shunt_equivalent()`；该路径目前默认关闭（见 1.4）。
 
 每次网页扫频都会追加到 `data/history.csv`，同时保留未校准的 `mag_v_raw/phase_deg_raw` 和已校准的 `mag_db_cal/phase_deg_cal`，便于事后重标定。
 
@@ -555,7 +597,7 @@ python3 -c "import json; d=json.load(open('data/acceptance_latest.json')); print
 
 ```bash
 sudo bash board/start_pl_i2s.sh
-bash start_dashboard.sh
+./start_dashboard.sh --no-ref
 ```
 
 ### 5.7 采集数据与重训模型（可选）
@@ -604,6 +646,44 @@ scp diagnosis_system/ml/model/topo_mlp.json \
 > 当前 `data/real/` 是 5 类 × 30 条；`opamp_lowpass` 只在 `gen_mock.py` 中保留为第 6 类占位，仓库没有对应实测数据。要识别运放电路，需要先补采该类数据再重训。
 
 > 另注：`train.py` 导出的 `topo_mlp.json` 中 `meta.trained_on` 目前仍固定写 `synthetic`（历史遗留字段），实际训练来源以 `--real-dir` 和 `report/ml_training_note.md` 为准。
+
+#### 3）改了校准或去嵌入开关后，如何重算已有数据（不用重测）
+
+`data/real/*.csv` 同时保存了 `mag_raw` / `phase_raw`（ADC 原始码与相位），它们与校准表无关。因此**换校准表或改 `cal_mode.json` 之后，可以对已有曲线离线重算**，不需要重新接电路：
+
+```python
+# 在板端项目根目录执行（走与在线完全相同的 calibration.apply_calibration）
+import csv, math, os, sys
+sys.path.insert(0, "python_model")
+import calibration as cal
+
+cal.ensure_calibration_loaded()
+print("cal_mode:", cal.load_cal_mode())      # 确认 hplane 是 True 还是 False
+
+SRC, DST = "data/real", "data/real_new"
+os.makedirs(DST, exist_ok=True)
+for name in sorted(os.listdir(SRC)):
+    if not name.endswith(".csv"):
+        continue
+    rows = list(csv.DictReader(open(os.path.join(SRC, name), encoding="utf-8-sig")))
+    out = []
+    for r in rows:
+        r = dict(r)
+        if r["phase_valid"] == "1" and float(r["mag_raw"]) > 0:
+            m, p = cal.apply_calibration(float(r["mag_raw"]), float(r["phase_raw"]),
+                                         float(r["freq"]), path=cal.CAL_PATH_DIRECT)
+            r["mag"] = "%.4f" % (20 * math.log10(m) if m > 0 else -99.0)
+            r["phase"] = "%.6f" % p
+        out.append(r)
+    w = csv.DictWriter(open(os.path.join(DST, name), "w", encoding="utf-8", newline=""),
+                       fieldnames=list(out[0].keys()))
+    w.writeheader()
+    w.writerows(out)
+```
+
+重算完把 `data/real_new/` 的内容替换 `data/real/`，再按上面第 2 步重训即可。
+
+> 2026-11-03 的 v3 数据集就是这样得到的：关闭 `hplane` 后，用同一张短接校准表把 150 条曲线的原始值重算了一遍，`rc_lowpass` 动态范围从 22.2 dB 恢复到 34.0 dB，全程没有重测。
 
 ### 5.8 重建 H 平面表（可选）
 
@@ -720,7 +800,7 @@ cp data/input_network.json data/input_network.json.bak-$(date +%Y%m%d-%H%M%S)
 cp data/input_network.built.json data/input_network.json
 # 重启 dashboard，让 input_network 重新加载
 sudo pkill -f run_dashboard.py
-bash start_dashboard.sh
+./start_dashboard.sh --no-ref
 ```
 
 > `input_network.py` 在进程内会缓存表；替换 JSON 后必须重启 dashboard 才生效。
@@ -785,14 +865,17 @@ bash board/cal_toggle.sh all      # 直连/缓冲都启用
 
 ## 七、已知限制与仓库说明
 
-1. **类别覆盖有限**：当前模型只有 5 类（RC/RL 低通/高通、RLC 带通）；`opamp_lowpass` 是代码中的第 6 类占位，没有实测数据。分类准确率 100% 只针对同环境 150 条曲线的 80/20 划分，不是跨设备泛化指标。
-2. **校准表是环境快照**：`data/calibration_table.json` 和 `data/input_network.json` 依赖短接帧相位、线缆、标准件容差、DAC 音量和温度。换环境时先停 dashboard，执行 `sudo bash board/start_pl_i2s.sh --force`，再用网页做一次“一键短接校准”；H 平面表在夹具不变时可以复用，但更换夹具/线缆后需要重建。
-3. **H 平面表是“短接表 + 标准件 sweep”的联合快照**：每一行都对应建表时使用的短接表。当前 22 行表混用了 12 组旧 session 标准件和 10 组近期标准件，因此 in-sample 校验只证明建表链路自洽；要做严格版本，应在当前 persistent session 下重扫全部标准件，不要用旧 raw + 当前短接表拼表。脚本会打印 `|H|>1`/session 警告，不要用调参掩盖配对问题。
-4. **近短路病态**：`|H|` 接近 1 时 `Z_dut = Zin(1-H)/H` 会放大误差；代码在 `|H| > 0.999` 时直接返回原 H。纯电感等低阻 DUT 的短接判据也可能放行，需要更细的绝对门限。
-5. **频率与拓扑限制**：20 Hz–20 kHz 覆盖音频范围内的 RC/RL/RLC，但不适合高频/射频或大功率电路；测量是单端两线方式，不是四线开尔文，夹具寄生会进入结果。
-6. **演示数据只有 20 点**：`data/dataset_rc_lpf.csv` 是保留的真机片段，PC 页面只画 20 点；完整 240 点演示曲线在 `diagnosis_system/dashboard/data_rc_lpf.csv`，可按 5.2 的说明替换。相应地，`tests/test_dashboard_api.py` 的 240 点断言也要在替换后才通过。
-7. **`.bit` 与 XSA 可能不同源**：`design_1_wrapper.xsa` 是当前实际加载的硬件平台；`.bit` 是兼容/备用。重新导出时请同时更新，避免资产检查失败或误用旧 bitstream。
-8. **路径硬编码**：`run_dashboard.py`、`board/start_pl_i2s.py`、`start_dashboard.sh`、`board/start_pl_i2s.sh` 默认项目路径为 `/home/xilinx/jupyter_notebooks/project`；部署到其他目录时需要同步修改或建软链接。
+1. **类别覆盖有限**：模型内部仍是 5 类（RC/RL 低通/高通、RLC 带通），`opamp_lowpass` 只是 `gen_mock.py` 里的第 6 类占位、没有实测数据；对外只输出 3 类形状。分类准确率 100% 只针对同环境 150 条曲线的 80/20 划分与 5 折交叉验证，不是跨设备泛化指标。
+2. **同 fc 下 RC 与 RL 不可辨识**（**最需要向读者说明的限制**）：两者传递函数同为 $1/(1+jf/f_c)$，实测曲线最大差异 1.3 dB，且随元件取值漂移。所以系统不回答"是 RC 还是 RL"，只回答"低通/高通/带通 + 观测拐点"。详见 **1.5 可辨识性说明**。
+3. **输出的是观测拐点，不是元件 fc**：夹具输入阻抗（约 10.9 kΩ）并联在输出端，使观测拐点比元件本身截止频率高 26%–92%（10k+100nF：159→291 Hz；100mH+1k：1592→3049 Hz）。反演 R/C/L 需要完整夹具模型 + 两点标定，属后续工作。
+4. **去嵌入当前关闭**：`cal_mode.json` 的 `hplane=false`。原 22 行 H 平面表在深衰减处外推不可靠（20 kHz 处 +12.4 dB 过校正），会把低通滚降拉平。关闭后曲线恢复物理形状，但绝对 dB 是夹具分压比，不能当器件参数。
+5. **校准表是环境快照**：`data/calibration_table.json` 依赖短接帧相位、线缆、DAC 音量和温度。换环境时先停 dashboard，执行 `sudo bash board/start_pl_i2s.sh --force`，再用网页做一次"一键短接校准"；H 平面表在夹具不变时可以复用，但更换夹具/线缆后需要重建。
+6. **H 平面表是"短接表 + 标准件 sweep"的联合快照**：每一行都对应建表时使用的短接表。当前 22 行表混用了 12 组旧 session 标准件和 10 组近期标准件，因此 in-sample 校验只证明建表链路自洽；要做严格版本，应在当前 persistent session 下重扫全部标准件，不要用旧 raw + 当前短接表拼表。
+7. **近短路病态**：`|H|` 接近 1 时 `Z_dut = Zin(1-H)/H` 会放大误差；代码在 `|H| > 0.999` 时直接返回原 H。纯电感等低阻 DUT 的短接判据也可能放行，需要更细的绝对门限。
+8. **频率与拓扑限制**：20 Hz–20 kHz 覆盖音频范围内的 RC/RL/RLC，但不适合高频/射频或大功率电路；测量是单端两线方式，不是四线开尔文，夹具寄生会进入结果。
+9. **演示数据只有 20 点**：`data/dataset_rc_lpf.csv` 是保留的真机片段，PC 页面只画 20 点；完整 240 点演示曲线在 `diagnosis_system/dashboard/data_rc_lpf.csv`，可按 5.2 的说明替换。
+10. **`.bit` 与 XSA 可能不同源**：`design_1_wrapper.xsa` 是当前实际加载的硬件平台；`.bit` 是兼容/备用。重新导出时请同时更新。
+11. **路径硬编码**：`run_dashboard.py`、`board/start_pl_i2s.py`、`start_dashboard.sh`、`board/start_pl_i2s.sh` 默认项目路径为 `/home/xilinx/jupyter_notebooks/project`；部署到其他目录时需要同步修改或建软链接。
 
 ---
 
@@ -825,11 +908,13 @@ bash board/cal_toggle.sh all      # 直连/缓冲都启用
 
 - [ ] 板端能 `import pynq`，Python 来自 `/usr/local/share/pynq-venv/bin/python3`
 - [ ] 上电后 `sudo bash board/start_pl_i2s.sh` 成功，`/tmp/pl_i2s_ready.json` 的 XSA 哈希与 `board/design_1_wrapper.xsa` 一致
-- [ ] `bash start_dashboard.sh` 后 `/tmp/dashboard.log` 出现 `dashboard only`，且启动时间不再包含 PL 加载
-- [ ] 页面右上角显示“自研 PL 解调实测”，不是“演示数据”
-- [ ] 接短接后“一键短接校准”完成，`data/calibration_table.json` 有 240 个 direct 频点，且 `meta.repeat` 等于网页输入轮次
+- [ ] `./start_dashboard.sh --no-ref` 后 `/tmp/dashboard.log` 出现 `dashboard only`，且启动时间不再包含 PL 加载
+- [ ] 页面右上角显示"自研 PL 解调实测"，不是"演示数据"
+- [ ] 接短接后点"一键短接校准"：按钮走完 `检测中 → 校准中 n% → 校准完毕 ✓`（绿），`data/calibration_table.json` 有 240 个 direct 频点
+- [ ] **接着 DUT 点"一键短接校准"应显示 `电路未短接`（红）并在 1~2 秒内返回，校准表时间戳不变**
 - [ ] `board/acceptance.py --backend rtl` 输出 `passed=True`，并写入 `data/acceptance_latest.json`
-- [ ] 短接扫频在 20 kHz 约为 0 dB / 0°，全频段相位平坦
-- [ ] 重建 H 平面表时短接表与标准件 sweep 同 session，校验无 >3 dB / 20° 警告
-- [ ] 换上 DUT 后，幅频/相频曲线符合预期，AI 返回拓扑与置信度
-- [ ] dashboard 连续重启 3 次、不再做短接校准，短接 20 kHz 校准相位仍在 ±0.01° 内
+- [ ] 短接扫频在 20 kHz 约为 0 dB / 0°，全频段相位平坦，240 点全部 `phase_valid=1`
+- [ ] 接 RC 低通（10k+100nF）扫频：AI 显示 `低通（观测拐点 ≈312 Hz）`，置信度 > 95%
+- [ ] 接 RLC 带通（100mH+10nF+1k）扫频：AI 显示 `带通（中心频率 ≈5.0 kHz）`
+- [ ] 拔掉 DUT 只留线缆扫频：AI 应显示 `数据无效`（最强点 < −30 dB），而不是硬给一个 100% 的结论
+- [ ] dashboard 连续重启 3 次、不再做短接校准，短接 20 kHz 校准相位仍在 ±0.1° 内
