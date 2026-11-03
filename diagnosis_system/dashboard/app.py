@@ -228,6 +228,25 @@ def _sweep_set(**kwargs):
         _SWEEP_STATE.update(kwargs)
 
 
+
+def _short_flatness_p90(sweep, expected, level_scale):
+    """\u5168\u9891\u6bb5\u5e73\u5766\u5ea6\uff1a\u771f\u77ed\u63a5\u5e94\u63a5\u8fd1 0 dB\u3002\u8fd4\u56de P90 \u504f\u5dee(dB)\u3002"""
+    import math as _m
+    devs = []
+    for item in sweep:
+        f, mag = item[0], item[1]
+        g = expected.get(round(float(f), 6))
+        if not g:
+            continue
+        h = (mag * g) / level_scale
+        if h > 0:
+            devs.append(abs(20.0 * _m.log10(h)))
+    if not devs:
+        return None
+    devs.sort()
+    return devs[min(len(devs) - 1, int(len(devs) * 0.9))]
+
+
 def _run_short_calibration_bg(repeat: int):
     """Measure the short and hand raw sweeps to calibrate_path.py.
 
@@ -295,6 +314,13 @@ def _run_short_calibration_bg(repeat: int):
                         progress=done,
                         message="正在进行短接校准（%d/%d）..." % (done, total))
 
+            _p90 = _short_flatness_p90(sweep, expected, level_scale)
+            if _p90 is not None and _p90 > 1.0:
+                raise RuntimeError(
+                    "\u68c0\u6d4b\u5230\u7535\u8def\u672a\u77ed\u63a5\uff1a"
+                    "\u5168\u9891\u6bb5\u504f\u79bb\u77ed\u63a5\u57fa\u51c6 P90=%.1f dB"
+                    "\uff08\u771f\u77ed\u63a5\u5e94 <1 dB\uff09\uff0c\u6821\u51c6\u5df2\u53d6\u6d88"
+                    % _p90)
             sweeps.append(sweep)
 
         result = calibrate_path.build_calibration_table(

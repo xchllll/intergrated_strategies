@@ -48,36 +48,88 @@ function applyStatus(source, calibration) {
     document.getElementById('calibration-detail').textContent = calibration.message || '状态未知';
 }
 
+const CAL_IDLE_TEXT = '\u4e00\u952e\u77ed\u63a5\u6821\u51c6';
+const CAL_BG_BUSY = 'linear-gradient(135deg,#c98a1e,#9c6a12)';
+const CAL_BG_OK = 'linear-gradient(135deg,#2b8a5a,#1f6e47)';
+const CAL_BG_ERR = 'linear-gradient(135deg,#c0392b,#96281b)';
+let __calHoldUntil = 0;
+let __calLastErr = null;
+let __calDoneShown = false;
+
+function _calBtn() {
+    return document.getElementById('cal-btn');
+}
+
+function _calSet(text, disabled, bg) {
+    const b = _calBtn();
+    if (!b) return;
+    b.textContent = text;
+    b.disabled = !!disabled;
+    b.style.background = bg || '';
+}
+
 function applyShortCalibrationStatus(shortCal) {
     window.__lastShortCal = shortCal || {};
     const startBtn = document.getElementById('start-btn');
-    const calBtn = document.getElementById('cal-btn');
     const running = !!(shortCal && shortCal.running);
+    const err = (shortCal && shortCal.error) || '';
+    const done = !!(shortCal && shortCal.done);
+    const sweepRunning = !!(window.__lastSweep && window.__lastSweep.running);
+
     if (startBtn) {
         if (running) {
             startBtn.disabled = true;
-            startBtn.textContent = '短接校准中...';
-            startBtn.title = shortCal.message || '一键短接校准进行中';
-        } else if (startBtn.textContent === '短接校准中...') {
+            startBtn.textContent = '\u77ed\u63a5\u6821\u51c6\u4e2d...';
+            startBtn.title = shortCal.message || '';
+        } else if (startBtn.textContent === '\u77ed\u63a5\u6821\u51c6\u4e2d...') {
             startBtn.disabled = false;
-            startBtn.textContent = '开始扫频测量';
+            startBtn.textContent = '\u5f00\u59cb\u626b\u9891\u6d4b\u91cf';
             startBtn.title = '';
         }
     }
-    if (calBtn) {
-        const sweepRunning = !!(window.__lastSweep && window.__lastSweep.running);
-        calBtn.disabled = running || sweepRunning;
-        calBtn.textContent = running ? '短接校准中...' : '一键短接校准';
-    }
+
     if (running) {
-        setNotice(shortCal.message || '正在进行一键短接校准，请保持短接...', false);
-    } else if (shortCal && shortCal.error) {
-        setNotice('短接校准失败：' + shortCal.error + '（校准表未改动）', true);
-    } else if (shortCal && shortCal.done) {
-        const points = shortCal.result && shortCal.result.points;
-        setNotice('短接校准完成' + (points ? '，共 ' + points + ' 点' : '') +
-                  '，校准表已更新。', false);
+        const total = shortCal.total || 0;
+        const pct = total ? Math.round((shortCal.progress || 0) * 100 / total) : 0;
+        _calSet('\u6821\u51c6\u4e2d ' + pct + '%', true, CAL_BG_BUSY);
+        setNotice(shortCal.message || '\u6b63\u5728\u77ed\u63a5\u6821\u51c6\uff0c\u8bf7\u4fdd\u6301\u77ed\u63a5...', false);
+        return;
     }
+
+    // 失败（可能在第一次轮询前就结束，所以按"错误内容变化"触发，而不是按 running 跳变）
+    if (err) {
+        if (err !== __calLastErr) {
+            __calLastErr = err;
+            const notShorted = /(\u4e0d\u662f\u77ed\u63a5|\u77ed\u63a5\u662f\u5426|\u5e45\u5ea6\u6bd4|\u5e45\u503c\u4e3a 0)/.test(err);
+            _calSet(notShorted ? '\u7535\u8def\u672a\u77ed\u63a5' : '\u6821\u51c6\u5931\u8d25', false, CAL_BG_ERR);
+            setNotice((notShorted ? '\u7535\u8def\u672a\u77ed\u63a5\uff0c\u8bf7\u63a5\u597d\u77ed\u63a5\u7ebf\u540e\u91cd\u8bd5\u3002' : '\u6821\u51c6\u5931\u8d25\uff1a') + err, true);
+            __calHoldUntil = Date.now() + 10000;
+        }
+        if (__calHoldUntil && Date.now() < __calHoldUntil) {
+            return;
+        }
+        _calSet(CAL_IDLE_TEXT, sweepRunning, sweepRunning ? CAL_BG_BUSY : '');
+        return;
+    }
+
+    if (done) {
+        if (!__calDoneShown) {
+            __calDoneShown = true;
+            _calSet('\u6821\u51c6\u5b8c\u6bd5 \u2713', false, CAL_BG_OK);
+            setNotice('\u6821\u51c6\u5b8c\u6bd5\uff0c\u6821\u51c6\u8868\u5df2\u66f4\u65b0\u3002', false);
+            __calHoldUntil = Date.now() + 10000;
+        }
+        if (__calHoldUntil && Date.now() < __calHoldUntil) {
+            return;
+        }
+        _calSet(CAL_IDLE_TEXT, sweepRunning, sweepRunning ? CAL_BG_BUSY : '');
+        return;
+    }
+
+    if (__calHoldUntil && Date.now() < __calHoldUntil) {
+        return;
+    }
+    _calSet(CAL_IDLE_TEXT, sweepRunning, sweepRunning ? CAL_BG_BUSY : '');
 }
 
 function applySweepStatus(sweep) {
@@ -103,24 +155,40 @@ function applySweepStatus(sweep) {
     }
 }
 
-function openShortCalibration() {
+async function openShortCalibration() {
+    const btn = _calBtn();
+    if (btn && btn.disabled) return;
     if (window.__lastShortCal && window.__lastShortCal.running) {
-        setNotice('短接校准正在进行，请稍候...', false);
+        _calSet('\u6821\u51c6\u4e2d...', true, CAL_BG_BUSY);
         return;
     }
     if (window.__lastSweep && window.__lastSweep.running) {
-        setNotice('扫频测量正在进行，请稍候...', false);
+        _calSet('\u626b\u9891\u4e2d\uff0c\u8bf7\u7a0d\u5019', true, CAL_BG_BUSY);
+        setTimeout(function () { _calSet(CAL_IDLE_TEXT, false, ''); }, 3000);
         return;
     }
-    const modal = document.getElementById('cal-modal');
-    const error = document.getElementById('cal-modal-error');
-    if (error) error.textContent = '';
-    if (modal) modal.hidden = false;
-    const input = document.getElementById('cal-repeat');
-    if (input) {
-        input.focus();
-        input.select();
+    __calHoldUntil = 0;
+    __calLastErr = null;
+    __calDoneShown = false;
+    _calSet('\u68c0\u6d4b\u4e2d...', true, CAL_BG_BUSY);
+    setNotice('\u6b63\u5728\u68c0\u67e5\u662f\u5426\u77ed\u63a5\u5e76\u542f\u52a8\u6821\u51c6...', false);
+    try {
+        const response = await fetch('/api/start_short_calibration', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ repeat: 3 })
+        });
+        const result = await response.json();
+        if (!response.ok || result.status !== 'started') {
+            throw new Error(result.msg || '\u540e\u7aef\u672a\u542f\u52a8\u6821\u51c6');
+        }
+        _calSet('\u6821\u51c6\u4e2d 0%', true, CAL_BG_BUSY);
+    } catch (error) {
+        _calSet('\u542f\u52a8\u5931\u8d25', false, CAL_BG_ERR);
+        setNotice('\u6821\u51c6\u542f\u52a8\u5931\u8d25\uff1a' + error.message, true);
+        __calHoldUntil = Date.now() + 6000;
     }
+    loadStatus();
 }
 
 function closeShortCalibration() {
